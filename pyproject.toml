@@ -1,0 +1,15 @@
+[project]
+name = "gpu-context-demo"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "cupy-cuda12x",
+    "marimo>=0.23.5",
+    "numpy>=2.4.4",
+    "nvidia-cuda-nvrtc-cu12",
+    "nvidia-cuda-runtime-cu12",
+    "pandas>=3.0.2",
+    "plotly>=6.7.0",
+]

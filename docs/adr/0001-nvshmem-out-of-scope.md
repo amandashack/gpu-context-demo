@@ -1,0 +1,3 @@
+# Exclude NVSHMEM from scope
+
+NVSHMEM provides one-sided RDMA-style GPU↔GPU shared memory across multiple devices — a different problem from this demo's intra-GPU context sharing. It was considered because both technologies use the word "shared," but the topology that motivates NVSHMEM (N ranks → M GPUs with cross-rank GPU exchange inside kernels) doesn't apply: this demo targets N workers → 1 GPU with independent kernel work. Phase 1 stays single-GPU, and the [MPS](https://docs.nvidia.com/deploy/mps/index.html) vs streams comparison is the actual question. Revisit if a later phase ever expands to multi-GPU with intra-kernel exchange — at that point NVSHMEM, NCCL, and MPI-via-CUDA-aware paths all come back onto the table.

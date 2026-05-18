@@ -288,36 +288,77 @@ def _(mo, n_workers):
 
 
 @app.cell
-def _(df, mo, modes_active, n_for_heatmap):
+def _(mo):
+    scale_mode = mo.ui.radio(
+        options=["auto-fit", "fixed"],
+        value="auto-fit",
+        label="Color range",
+    )
+    cmin_input = mo.ui.number(value=0.5, start=0.01, stop=100.0, step=0.05, label="cmin")
+    cmax_input = mo.ui.number(value=2.0, start=0.01, stop=100.0, step=0.05, label="cmax")
+    mo.hstack([scale_mode, cmin_input, cmax_input])
+    return cmax_input, cmin_input, scale_mode
+
+
+@app.cell
+def _(cmax_input, cmin_input, df, mo, modes_active, n_for_heatmap, scale_mode):
     import plotly.graph_objects as go
     from plotly.subplots import make_subplots
+    import numpy as np
 
     def _heatmap():
         n_sel = int(n_for_heatmap.value)
-        non_baseline_modes = [m for m in modes_active if m != "A"]
 
-        if not non_baseline_modes:
-            mo.stop(True, mo.md("*Only Mode A is active — nothing to compare against.*"))
+        # Which panels to render — Mode C/A is always present; the others appear when Mode B was swept.
+        panels = [("C", "A")]
+        if "B" in modes_active:
+            panels.append(("B", "A"))
+            panels.append(("C", "B"))
+
+        def _ratio(num, den):
+            num_t = df[(df["mode"] == num) & (df["n"] == n_sel)].pivot_table(
+                index="work", columns="blocks", values="throughput"
+            )
+            den_t = df[(df["mode"] == den) & (df["n"] == n_sel)].pivot_table(
+                index="work", columns="blocks", values="throughput"
+            )
+            return num_t / den_t
+
+        pivots = [(num, den, _ratio(num, den)) for num, den in panels]
+
+        if scale_mode.value == "fixed":
+            cmin = float(cmin_input.value)
+            cmax = float(cmax_input.value)
+        else:
+            all_vals = np.concatenate([p[2].values.flatten() for p in pivots])
+            finite = all_vals[np.isfinite(all_vals) & (all_vals > 0)]
+            if len(finite) > 0:
+                # Symmetric in log-space so 1.0 stays at the colormap midpoint
+                log_max = max(float(np.max(np.abs(np.log(finite)))), 0.05)
+                cmax = float(np.exp(log_max))
+                cmin = 1.0 / cmax
+            else:
+                cmin, cmax = 0.5, 2.0
 
         fig = make_subplots(
             rows=1,
-            cols=len(non_baseline_modes),
-            subplot_titles=[f"Mode {m} speedup over A · N={n_sel}" for m in non_baseline_modes],
+            cols=len(pivots),
+            subplot_titles=[f"Mode {num} / Mode {den} · N={n_sel}" for num, den, _ in pivots],
             shared_yaxes=True,
         )
 
-        for i, mode in enumerate(non_baseline_modes, start=1):
-            sub = df[(df["mode"] == mode) & (df["n"] == n_sel)]
-            pivot = sub.pivot_table(index="work", columns="blocks", values="speedup_vs_A")
+        for i, (num, den, pivot) in enumerate(pivots, start=1):
             fig.add_trace(
                 go.Heatmap(
                     z=pivot.values,
                     x=[str(c) for c in pivot.columns],
                     y=[str(r) for r in pivot.index],
-                    colorscale="RdBu_r",
-                    zmid=1.0,
-                    colorbar=dict(title="speedup", x=1.0 + 0.1 * (i - 1)) if i == len(non_baseline_modes) else None,
-                    hovertemplate="blocks=%{x}<br>work=%{y}<br>speedup=%{z:.2f}x<extra></extra>",
+                    coloraxis="coloraxis",
+                    hovertemplate=(
+                        f"Mode {num} / Mode {den}<br>"
+                        "blocks=%{x}<br>work=%{y}<br>"
+                        "speedup=%{z:.2f}x<extra></extra>"
+                    ),
                 ),
                 row=1,
                 col=i,
@@ -325,7 +366,17 @@ def _(df, mo, modes_active, n_for_heatmap):
 
         fig.update_xaxes(title="blocks (occupancy)")
         fig.update_yaxes(title="work_per_thread (duration)", col=1)
-        fig.update_layout(height=400, margin=dict(t=80, b=60))
+        fig.update_layout(
+            height=400,
+            margin=dict(t=80, b=60),
+            coloraxis=dict(
+                colorscale="RdBu_r",
+                cmin=cmin,
+                cmax=cmax,
+                cmid=1.0,
+                colorbar=dict(title="speedup"),
+            ),
+        )
         return fig
 
     _heatmap()
@@ -337,13 +388,25 @@ def _(mo):
     mo.md(r"""
     ### How to read the heatmap
 
-    - **Red** = the mode is faster than Mode A (baseline). MPS or streams paid off.
-    - **Blue** = the mode is *slower* than Mode A. Overhead exceeded the benefit.
-    - **White** = no significant difference.
+    Each panel is **Mode X / Mode Y** — it shows X's throughput as a multiple of Y's
+    at the same (N, blocks, work) point.
 
-    The interesting cells are where the heatmap is decisively red — that's a regime
-    where the mode is doing real work. Use the dropdown above to see how the picture
-    changes as N grows.
+    - **Red** = X faster than Y (speedup > 1).
+    - **Blue** = X slower than Y (speedup < 1).
+    - **White** = roughly equal.
+
+    When Mode B is active, three panels appear:
+
+    - **C / A** — what *any* context-sharing buys you over no sharing.
+    - **B / A** — what MPS specifically buys you over no sharing.
+    - **C / B** — does the streams substrate beat the MPS substrate, given both
+      share a context? Mostly white means context sharing is the only lever;
+      mostly red means streams have less overhead than MPS; mostly blue means MPS
+      schedules more aggressively somehow.
+
+    All panels share one color scale. Toggle between **auto-fit** (uses the full
+    dynamic range of this sweep — best contrast within a run) and **fixed** (lock
+    `cmin`/`cmax` for cross-sweep comparability).
     """)
     return
 

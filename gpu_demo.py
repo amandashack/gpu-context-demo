@@ -42,10 +42,15 @@ def _(mo):
     import mps_helper
 
     props = cp.cuda.runtime.getDeviceProperties(0)
+    # maxThreadsPerMultiProcessor is a standard cudaDeviceProp field; default to 2048
+    # (the value for every compute capability since Kepler) if a CuPy build omits it.
+    max_threads_per_sm_detected = props.get("maxThreadsPerMultiProcessor", 2048)
+    sm_count_detected = props["multiProcessorCount"]
     device_info = {
         "name": props["name"].decode(),
         "compute_cap": f"{props['major']}.{props['minor']}",
-        "sm_count": props["multiProcessorCount"],
+        "sm_count": sm_count_detected,
+        "max_threads_per_sm": max_threads_per_sm_detected,
         "mem_total_mib": props["totalGlobalMem"] // (1024 * 1024),
         "max_threads_per_block": props["maxThreadsPerBlock"],
     }
@@ -54,13 +59,13 @@ def _(mo):
     banner = mo.md(
         f"""
     **GPU:** {device_info['name']} · CC {device_info['compute_cap']} ·
-    **{device_info['sm_count']} SMs** · {device_info['mem_total_mib']} MiB
+    **{device_info['sm_count']} SMs** · {device_info['max_threads_per_sm']} threads/SM · {device_info['mem_total_mib']} MiB
 
     **MPS daemon:** {'available — Mode B enabled' if mps_available else 'NOT available (likely WSL2) — Mode B disabled'}
     """
     )
     banner
-    return mps_available, mps_helper
+    return max_threads_per_sm_detected, mps_available, mps_helper, sm_count_detected
 
 
 @app.cell
@@ -72,14 +77,65 @@ def _(mo):
 
 
 @app.cell
-def _(mo):
-    n_workers_sel = mo.ui.multiselect(
-        options=["1", "2", "4", "8"], value=["1", "2", "4"], label="Worker counts (N)"
+def _(mo, sm_count_detected):
+    import os
+
+    # SM count is editable so you can model a different GPU than the one you're on.
+    sm_count_input = mo.ui.number(
+        start=1,
+        stop=2048,
+        step=1,
+        value=sm_count_detected,
+        label="SM count (edit to model a different GPU)",
     )
+    threads_per_block_sel = mo.ui.dropdown(
+        options=["128", "256", "512"], value="256", label="Threads per block"
+    )
+    cpu_count = os.cpu_count() or 8
+
+    mo.vstack(
+        [
+            mo.md("### Hardware model — block & worker options scale to this"),
+            sm_count_input,
+            threads_per_block_sel,
+        ]
+    )
+    return cpu_count, sm_count_input, threads_per_block_sel
+
+
+@app.cell
+def _(cpu_count, max_threads_per_sm_detected, mo, sm_count_input, threads_per_block_sel):
+    threads_per_block = int(threads_per_block_sel.value)
+    sm_count = int(sm_count_input.value)
+
+    # Concurrent-block capacity at full occupancy. Thread-limited: valid for
+    # threads_per_block >= 128, where the per-SM block cap (16-32) isn't binding.
+    blocks_per_sm = max(1, max_threads_per_sm_detected // threads_per_block)
+    saturation_blocks = sm_count * blocks_per_sm
+
+    # Block options expressed as fractions/multiples of the saturation point,
+    # so the occupancy axis means the same thing on any GPU.
+    fractions = [0.05, 0.125, 0.25, 0.5, 1.0, 2.0, 4.0]
+    block_options = sorted({max(1, round(f * saturation_blocks)) for f in fractions})
+    block_option_strs = [str(b) for b in block_options]
+    default_blocks = block_option_strs[::2] or [block_option_strs[0]]
+    sat_caption = " · ".join(f"{b}={b / saturation_blocks * 100:.0f}%" for b in block_options)
+
+    # Worker options: powers of two up to CPU count (Mode A/B are process-bound).
+    worker_options = []
+    _n = 1
+    while _n <= cpu_count:
+        worker_options.append(str(_n))
+        _n *= 2
+    default_workers = [w for w in ["1", "2", "4"] if w in worker_options] or [worker_options[0]]
+
     blocks_sel = mo.ui.multiselect(
-        options=["1", "5", "10", "20", "40"],
-        value=["1", "10", "40"],
-        label="Grid size (blocks) — controls occupancy",
+        options=block_option_strs,
+        value=default_blocks,
+        label=f"Grid size (blocks) — saturation ≈ {saturation_blocks}",
+    )
+    n_workers_sel = mo.ui.multiselect(
+        options=worker_options, value=default_workers, label="Worker counts (N)"
     )
     work_sel = mo.ui.multiselect(
         options=["100", "1000", "10000", "100000"],
@@ -90,12 +146,24 @@ def _(mo):
     kernel_count_sel = mo.ui.slider(5, 50, value=20, label="Kernels per trial")
     enable_b = mo.ui.checkbox(value=False, label="Force-enable Mode B (only do this if MPS works)")
 
-    mo.vstack([n_workers_sel, blocks_sel, work_sel, trials_sel, kernel_count_sel, enable_b])
+    mo.vstack(
+        [
+            mo.md(f"*Block options (% of saturation):* {sat_caption}"),
+            blocks_sel,
+            n_workers_sel,
+            work_sel,
+            trials_sel,
+            kernel_count_sel,
+            enable_b,
+        ]
+    )
     return (
         blocks_sel,
         enable_b,
         kernel_count_sel,
         n_workers_sel,
+        saturation_blocks,
+        threads_per_block,
         trials_sel,
         work_sel,
     )
@@ -109,6 +177,7 @@ def _(
     mo,
     mps_available,
     n_workers_sel,
+    saturation_blocks,
     trials_sel,
     work_sel,
 ):
@@ -122,12 +191,20 @@ def _(
     total_points = len(n_workers) * len(blocks_values) * len(work_values)
     modes_active = ["A", "C"] + (["B"] if mode_b_enabled else [])
 
+    # Peak concurrent blocks the sweep will request, vs the GPU's saturation point.
+    # Crossing ~100% is where B/C speedup over A should collapse toward 1.0.
+    peak_concurrent = (max(n_workers) * max(blocks_values)) if n_workers and blocks_values else 0
+    peak_pct = peak_concurrent / saturation_blocks * 100 if saturation_blocks else 0
+    crosses_sat = "✅ crosses saturation" if peak_concurrent >= saturation_blocks else "⚠️ never saturates — raise blocks or N to see the collapse"
+
     mo.md(
         f"""
     **Sweep size:** {total_points} parameter points × {len(modes_active)} modes ({', '.join(modes_active)}) × {trials} trials
     = **{total_points * len(modes_active) * trials} runs**.
 
     Each run = warmup + {kernel_count} timed kernel launches.
+
+    **Peak concurrent blocks:** {peak_concurrent} = **{peak_pct:.0f}%** of saturation ({saturation_blocks}) — {crosses_sat}
     """
     )
     return (
@@ -158,6 +235,7 @@ def _(
     mps_helper,
     n_workers,
     run_button,
+    threads_per_block,
     trials,
     work_values,
 ):
@@ -216,7 +294,7 @@ def _(
                         for work in work_values:
                             cfg = dict(
                                 blocks=blocks,
-                                threads_per_block=256,
+                                threads_per_block=threads_per_block,
                                 work_per_thread=work,
                                 kernel_count=kernel_count,
                                 warmup_count=5,

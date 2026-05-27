@@ -239,14 +239,15 @@ def _(
     trials,
     work_values,
 ):
+    import json
     import multiprocessing as mp
+    import os as _os
     import statistics
     import time
 
     import worker as worker_mod
 
-    if not run_button.value:
-        mo.stop(True, mo.md("*Press **Run sweep** to start.*"))
+    _cache_path = _os.path.join("__marimo__", "sweep_cache.json")
 
     def _sweep():
         ctx = mp.get_context("spawn")
@@ -319,12 +320,28 @@ def _(
 
         return rows, time.perf_counter() - sweep_start
 
-    rows, sweep_elapsed = _sweep()
-    return rows, sweep_elapsed
+    if run_button.value:
+        rows, sweep_elapsed = _sweep()
+        # Persist so a kernel restart on the node (e.g. after the SSH session drops)
+        # can reload results without re-running the sweep. __marimo__/ is gitignored.
+        _os.makedirs("__marimo__", exist_ok=True)
+        with open(_cache_path, "w") as _f:
+            json.dump({"rows": rows, "sweep_elapsed": sweep_elapsed}, _f)
+        from_cache = False
+    elif _os.path.exists(_cache_path):
+        with open(_cache_path) as _f:
+            _cached = json.load(_f)
+        rows = _cached["rows"]
+        sweep_elapsed = _cached["sweep_elapsed"]
+        from_cache = True
+    else:
+        mo.stop(True, mo.md("*Press **Run sweep** to start (no cached results found).*"))
+
+    return from_cache, rows, sweep_elapsed
 
 
 @app.cell
-def _(mo, rows, sweep_elapsed):
+def _(from_cache, mo, rows, sweep_elapsed):
     import pandas as pd
     df = pd.DataFrame(rows)
 
@@ -337,9 +354,14 @@ def _(mo, rows, sweep_elapsed):
     df = df.join(baseline, on=["n", "blocks", "work"])
     df["speedup_vs_A"] = df["throughput"] / df["baseline"]
 
+    _header = (
+        "### Results · loaded from cache (press *Run sweep* to refresh)"
+        if from_cache
+        else f"### Results · sweep took {sweep_elapsed:.1f}s"
+    )
     mo.vstack(
         [
-            mo.md(f"### Results · sweep took {sweep_elapsed:.1f}s"),
+            mo.md(_header),
             mo.ui.table(df.round(3), pagination=True),
         ]
     )
@@ -355,10 +377,13 @@ def _(mo):
 
 
 @app.cell
-def _(mo, n_workers):
+def _(df, mo):
+    # Derived from the loaded results (not the live config) so the view stays
+    # consistent with whatever sweep is currently cached.
+    _ns = sorted(df["n"].unique())
     n_for_heatmap = mo.ui.dropdown(
-        options=[str(n) for n in n_workers],
-        value=str(n_workers[-1]),
+        options=[str(n) for n in _ns],
+        value=str(_ns[-1]),
         label="N (worker count) shown on heatmap",
     )
     n_for_heatmap
@@ -379,7 +404,7 @@ def _(mo):
 
 
 @app.cell
-def _(cmax_input, cmin_input, df, mo, modes_active, n_for_heatmap, scale_mode):
+def _(cmax_input, cmin_input, df, mo, n_for_heatmap, scale_mode):
     import plotly.graph_objects as go
     from plotly.subplots import make_subplots
     import numpy as np
@@ -389,7 +414,7 @@ def _(cmax_input, cmin_input, df, mo, modes_active, n_for_heatmap, scale_mode):
 
         # Which panels to render — Mode C/A is always present; the others appear when Mode B was swept.
         panels = [("C", "A")]
-        if "B" in modes_active:
+        if "B" in set(df["mode"]):
             panels.append(("B", "A"))
             panels.append(("C", "B"))
 
@@ -498,15 +523,17 @@ def _(mo):
 
 
 @app.cell
-def _(blocks_values, mo, work_values):
+def _(df, mo):
+    _blocks = sorted(df["blocks"].unique())
+    _works = sorted(df["work"].unique())
     drill_blocks = mo.ui.dropdown(
-        options=[str(b) for b in blocks_values],
-        value=str(blocks_values[len(blocks_values) // 2]),
+        options=[str(b) for b in _blocks],
+        value=str(_blocks[len(_blocks) // 2]),
         label="blocks",
     )
     drill_work = mo.ui.dropdown(
-        options=[str(w) for w in work_values],
-        value=str(work_values[len(work_values) // 2]),
+        options=[str(w) for w in _works],
+        value=str(_works[len(_works) // 2]),
         label="work_per_thread",
     )
     mo.hstack([drill_blocks, drill_work])

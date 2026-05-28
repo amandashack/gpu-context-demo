@@ -43,6 +43,14 @@ The full cross-product of all configured (n, blocks, work) values × all active 
 **Warmup**:
 The 5 pre-timing kernel launches per Worker (per stream, in Mode C). Absorbs NVRTC JIT compilation, command-buffer allocation, instruction-cache filling, and other lazy-init costs so the timed region measures steady-state behavior.
 
+**Occupancy / saturation**:
+*Occupancy* is how full the GPU's per-SM warp slots are. *Saturation* is the grid size at which one kernel alone fills the device: `sm_count × (max_threads_per_sm ÷ threads_per_block)`. The heatmap x-axis is occupancy as **% of saturation**, and there is an exact identity behind the "blocks = occupancy" shorthand: with `threads_per_block` fixed and a resource-light kernel (so the per-SM ceiling is reachable), `blocks ÷ saturation_blocks` equals the device-average occupancy — the `threads_per_block` term cancels. Change either assumption (sweep block size, or use a register/shared-memory-heavy kernel) and grid size stops tracking occupancy; that fuller picture is Phase 2.
+_Avoid_: implying occupancy depends on SM count — occupancy is per-SM; only the saturation *point* scales with SM count.
+
+**Launch-bound / compute-bound**:
+The two regimes along the duration axis. *Launch-bound*: kernels finish faster than the host can issue the next launch, so wall-clock is set by the CPU's launch rate and the GPU idles between kernels — the low-`work_per_thread` end. *Compute-bound*: GPU execution per kernel dominates and the launch loop keeps up — the high-`work_per_thread` end. The distinction is what makes Mode C's single launching thread a liability at high N in the launch-bound corner (Modes A/B launch from N processes in parallel), so C can lose to A there despite sharing a context.
+_Avoid_: "memory-bound" — `busy_kernel` has no memory traffic to stall on; that's a Phase 2 / different-kernel regime.
+
 ## Relationships
 
 - A run has exactly one **Mode** and one value of N (number of **Workers**).

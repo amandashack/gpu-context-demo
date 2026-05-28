@@ -24,15 +24,52 @@ def _(mo):
     mo.md(r"""
     # GPU context-sharing scaling demo
 
-    Compares three ways for **N independent workers** to share **one GPU**:
+    **The question this answers:** you have **N independent workers** that each launch
+    GPU kernels, and **one GPU**. Is it worth making them *share* a single CUDA context
+    — via MPS or CUDA streams — or should you just run them as separate processes? And
+    at what point does sharing stop helping?
 
-    - **Mode A** — N processes, each with its own CUDA context. Driver time-slices kernels.
-    - **Mode B** — N processes sharing one context via **MPS**. Kernels can overlap on the GPU.
-    - **Mode C** — 1 process with **N CUDA streams**. No process boundary at all.
+    Three ways to run N workers on one GPU:
 
-    Sweep occupancy (`blocks`) and per-kernel duration (`work_per_thread`); read off
-    the heatmap where each mode wins.
+    - **Mode A** — N processes, each with its **own** CUDA context. The driver
+      time-slices the GPU between contexts: only one context's kernels run at a time,
+      so spare capacity sits idle.
+    - **Mode B** — N processes sharing **one** context via **MPS** (Multi-Process
+      Service). Kernels from different processes can overlap on different SMs.
+    - **Mode C** — **1 process**, one context, **N CUDA streams**. Same overlap as B,
+      but no process boundary — a single host thread launches all streams.
+
+    The sweep varies **occupancy** (how full the GPU is) and **kernel duration**; the
+    heatmap shows, at each point, how much faster a shared mode (B or C) is than the
+    no-sharing baseline (A).
     """)
+    return
+
+
+@app.cell
+def _(mo):
+    mo.accordion(
+        {
+            "Key terms — click to expand": mo.md(r"""
+- **Worker** — one unit of concurrent kernel submission: an OS *process* in Modes A/B,
+  a CUDA *stream* in Mode C. Modes are always compared at constant N (worker count).
+- **Occupancy** — how full the GPU's per-SM warp slots are. The heatmap x-axis is
+  occupancy as **% of saturation** (100% = every SM packed). It's swept here via grid
+  size (`blocks`), because block size and the kernel's resource use are held fixed.
+- **Saturation** — the grid size at which *one* kernel alone fills the GPU
+  (`SM count × blocks-per-SM`). Past it, a single kernel uses the whole device, so
+  sharing can add nothing.
+- **Launch-bound** — kernels so short the GPU finishes one faster than the host can
+  launch the next; throughput is capped by the CPU's launch rate, not the GPU. The
+  low-`work_per_thread` end of the y-axis.
+- **Compute-bound** — kernels long enough that GPU execution dominates and the launch
+  loop keeps up. The high-`work_per_thread` end.
+- **Throughput** — `total kernels ÷ wall-clock` (kernels/sec); the median over trials.
+- **Speedup** — a panel labelled *Mode X / Mode Y* is X's throughput ÷ Y's at the same
+  (N, occupancy, duration) point.
+"""),
+        }
+    )
     return
 
 
@@ -404,10 +441,19 @@ def _(mo):
 
 
 @app.cell
-def _(cmax_input, cmin_input, df, mo, n_for_heatmap, scale_mode):
+def _(cmax_input, cmin_input, df, mo, n_for_heatmap, saturation_blocks, scale_mode):
     import plotly.graph_objects as go
     from plotly.subplots import make_subplots
     import numpy as np
+
+    def _ratio(num, den, n):
+        num_t = df[(df["mode"] == num) & (df["n"] == n)].pivot_table(
+            index="work", columns="blocks", values="throughput"
+        )
+        den_t = df[(df["mode"] == den) & (df["n"] == n)].pivot_table(
+            index="work", columns="blocks", values="throughput"
+        )
+        return num_t / den_t
 
     def _heatmap():
         n_sel = int(n_for_heatmap.value)
@@ -418,22 +464,18 @@ def _(cmax_input, cmin_input, df, mo, n_for_heatmap, scale_mode):
             panels.append(("B", "A"))
             panels.append(("C", "B"))
 
-        def _ratio(num, den):
-            num_t = df[(df["mode"] == num) & (df["n"] == n_sel)].pivot_table(
-                index="work", columns="blocks", values="throughput"
-            )
-            den_t = df[(df["mode"] == den) & (df["n"] == n_sel)].pivot_table(
-                index="work", columns="blocks", values="throughput"
-            )
-            return num_t / den_t
-
-        pivots = [(num, den, _ratio(num, den)) for num, den in panels]
+        pivots = [(num, den, _ratio(num, den, n_sel)) for num, den in panels]
 
         if scale_mode.value == "fixed":
             cmin = float(cmin_input.value)
             cmax = float(cmax_input.value)
         else:
-            all_vals = np.concatenate([p[2].values.flatten() for p in pivots])
+            # Span every N (not just the selected one) so flipping the N dropdown
+            # doesn't silently rebase the scale and break cross-N comparison.
+            all_n = sorted(df["n"].unique())
+            all_vals = np.concatenate(
+                [_ratio(num, den, nn).values.flatten() for num, den in panels for nn in all_n]
+            )
             finite = all_vals[np.isfinite(all_vals) & (all_vals > 0)]
             if len(finite) > 0:
                 # Symmetric in log-space so 1.0 stays at the colormap midpoint
@@ -451,15 +493,23 @@ def _(cmax_input, cmin_input, df, mo, n_for_heatmap, scale_mode):
         )
 
         for i, (num, den, pivot) in enumerate(pivots, start=1):
+            blocks_cols = list(pivot.columns)
+            # x-axis reads as occupancy (% of saturation); the raw block count rides
+            # along in customdata so hover still shows what was actually launched.
+            occ_labels = [f"{b / saturation_blocks * 100:.0f}%" for b in blocks_cols]
+            block_grid = np.tile(blocks_cols, (len(pivot.index), 1))
             fig.add_trace(
                 go.Heatmap(
                     z=pivot.values,
-                    x=[str(c) for c in pivot.columns],
+                    x=occ_labels,
                     y=[str(r) for r in pivot.index],
+                    customdata=block_grid,
                     coloraxis="coloraxis",
                     hovertemplate=(
                         f"Mode {num} / Mode {den}<br>"
-                        "blocks=%{x}<br>work=%{y}<br>"
+                        "occupancy=%{x} of saturation<br>"
+                        "blocks=%{customdata}<br>"
+                        "work_per_thread=%{y}<br>"
                         "speedup=%{z:.2f}x<extra></extra>"
                     ),
                 ),
@@ -467,8 +517,11 @@ def _(cmax_input, cmin_input, df, mo, n_for_heatmap, scale_mode):
                 col=i,
             )
 
-        fig.update_xaxes(title="blocks (occupancy)")
-        fig.update_yaxes(title="work_per_thread (duration)", col=1)
+        fig.update_xaxes(title="occupancy (% of GPU saturation)")
+        fig.update_yaxes(
+            title="work_per_thread (low → launch-bound · high → compute-bound)",
+            col=1,
+        )
         fig.update_layout(
             height=400,
             margin=dict(t=80, b=60),
@@ -491,25 +544,39 @@ def _(mo):
     mo.md(r"""
     ### How to read the heatmap
 
-    Each panel is **Mode X / Mode Y** — it shows X's throughput as a multiple of Y's
-    at the same (N, blocks, work) point.
+    **Axes.** Columns = **occupancy** (% of saturation — 100% means one kernel already
+    fills every SM). Rows = **kernel duration** (`work_per_thread`): the bottom is
+    **launch-bound** (kernels so short the GPU waits on the CPU's launch rate), the top
+    is **compute-bound** (GPU execution dominates). Hover any cell for the raw block count.
+
+    **Cells.** Each panel is **Mode X / Mode Y** — X's throughput as a multiple of Y's
+    at the same (N, occupancy, duration) point.
 
     - **Red** = X faster than Y (speedup > 1).
     - **Blue** = X slower than Y (speedup < 1).
     - **White** = roughly equal.
 
+    **What to look for:**
+
+    - **Low occupancy + longer kernels** (left, upper) — the sharing win. One kernel
+      leaves the GPU mostly empty, so overlapping N of them on different SMs pays off:
+      C/A and B/A go red.
+    - **At / past saturation** (right columns) — the collapse. One kernel fills the GPU
+      on its own, so sharing adds nothing and the panels fade to white/blue.
+    - **Launch-bound corner** (bottom, worst at high N for Mode C) — Mode C funnels all
+      N streams' launches through one host thread, while A/B launch from N processes in
+      parallel, so **C can lose to A** here. C/B going blue as N grows is the same
+      effect — a substrate gap, not a context-sharing one.
+
     When Mode B is active, three panels appear:
 
-    - **C / A** — what *any* context-sharing buys you over no sharing.
-    - **B / A** — what MPS specifically buys you over no sharing.
-    - **C / B** — does the streams substrate beat the MPS substrate, given both
-      share a context? Mostly white means context sharing is the only lever;
-      mostly red means streams have less overhead than MPS; mostly blue means MPS
-      schedules more aggressively somehow.
+    - **C / A** — what *any* context-sharing buys over no sharing.
+    - **B / A** — what MPS specifically buys over no sharing.
+    - **C / B** — streams vs MPS, *given* both share a context. Mostly white = context
+      sharing is the only lever; blue = MPS's parallel launching wins (e.g. launch-bound).
 
-    All panels share one color scale. Toggle between **auto-fit** (uses the full
-    dynamic range of this sweep — best contrast within a run) and **fixed** (lock
-    `cmin`/`cmax` for cross-sweep comparability).
+    Color scale: **auto-fit** spans every N in the sweep, so flipping the N selector
+    keeps one comparable scale; **fixed** locks `cmin`/`cmax` for cross-sweep comparison.
     """)
     return
 
@@ -518,6 +585,10 @@ def _(mo):
 def _(mo):
     mo.md(r"""
     ## Drilldown — throughput vs N
+
+    Fix one (blocks, duration) point and watch throughput scale with N. A **flat** Mode C
+    line is the launch-bound signature — more streams don't help when one host thread
+    launches them all. A line that **rises then plateaus** is hitting saturation.
     """)
     return
 

@@ -9,7 +9,7 @@ An interactive [Marimo](https://marimo.io/) notebook that benchmarks three ways 
 | **N processes** | **Mode A** — driver time-slices kernels       | **Mode B** — shared via MPS, kernels overlap |
 | **1 process**   | (omitted, see `CONTEXT.md`)                  | **Mode C** — N CUDA streams                 |
 
-The heatmap sweeps `(N workers, blocks-per-kernel, work-per-thread)` and reports throughput speedup over Mode A. The interesting regimes are short kernels with low occupancy at high N — that's where context sharing pays off.
+The heatmap sweeps `(N workers, blocks-per-kernel, work-per-thread)` and reports throughput speedup over Mode A. The sharing win shows up at **low occupancy with kernels long enough not to be launch-bound**; it collapses once a single kernel saturates the GPU, and in the launch-bound corner Mode C can even lose to A (one host thread launching all streams vs N processes launching in parallel).
 
 ## Requirements
 
@@ -39,11 +39,13 @@ Press **Run sweep** in the UI; tick **Force-enable Mode B** if MPS is available.
 
 ## Reading the heatmap
 
-- **Red** = mode is *faster* than Mode A at this `(N, blocks, work)` point
-- **Blue** = mode is *slower* than Mode A
+Columns are **occupancy** (% of GPU saturation); rows are **kernel duration** (`work_per_thread`) — low rows are launch-bound, high rows compute-bound. Each panel is *Mode X / Mode Y*:
+
+- **Red** = X *faster* than Y at this `(N, occupancy, duration)` point
+- **Blue** = X *slower* than Y
 - **White** = no significant difference
 
-The dropdown selects which N to view; the dropdowns below the heatmap let you drill into throughput-vs-N for a fixed `(blocks, work)`.
+The dropdown selects which N to view; the dropdowns below drill into throughput-vs-N for a fixed point. Hover any cell for the raw block count behind the occupancy %.
 
 ## Docs
 

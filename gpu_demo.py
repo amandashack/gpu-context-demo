@@ -77,12 +77,26 @@ def _(mo):
 def _(mo):
     import cupy as cp
     import mps_helper
+    import worker as worker_probe
 
     props = cp.cuda.runtime.getDeviceProperties(0)
-    # maxThreadsPerMultiProcessor is a standard cudaDeviceProp field; default to 2048
-    # (the value for every compute capability since Kepler) if a CuPy build omits it.
+    # These are all standard cudaDeviceProp fields. The CUDA struct spells them with
+    # mixed casing (regsPer*M*ultiprocessor vs maxBlocksPer*M*ultiProcessor — not a typo
+    # here, that inconsistency is in the headers); CuPy mirrors the names verbatim.
+    # Fall back to Volta/Turing/Ampere/Hopper-common values if a CuPy build omits a field.
     max_threads_per_sm_detected = props.get("maxThreadsPerMultiProcessor", 2048)
+    regs_per_sm = props.get("regsPerMultiprocessor", 65536)       # 64K regs/SM since Volta
+    smem_per_sm = props.get("sharedMemPerMultiprocessor", 0)      # 0 = unknown → cap won't bind
+    max_blocks_per_sm = props.get("maxBlocksPerMultiProcessor", 32)
     sm_count_detected = props["multiProcessorCount"]
+
+    # Probe the demo kernel's real per-thread/per-block resource use. Accessing these
+    # RawKernel attributes triggers an NVRTC compile and a cuFuncGetAttribute query, so
+    # they reflect what nvcc actually allocated — not an estimate.
+    probe_kernel = cp.RawKernel(worker_probe.KERNEL_SRC, "busy_kernel")
+    kernel_regs = probe_kernel.num_regs
+    kernel_smem = probe_kernel.shared_size_bytes
+
     device_info = {
         "name": props["name"].decode(),
         "compute_cap": f"{props['major']}.{props['minor']}",
@@ -96,13 +110,27 @@ def _(mo):
     banner = mo.md(
         f"""
     **GPU:** {device_info['name']} · CC {device_info['compute_cap']} ·
-    **{device_info['sm_count']} SMs** · {device_info['max_threads_per_sm']} threads/SM · {device_info['mem_total_mib']} MiB
+    **{device_info['sm_count']} SMs** · {device_info['max_threads_per_sm']} threads/SM ·
+    {regs_per_sm // 1024}K regs/SM · {smem_per_sm // 1024} KiB smem/SM · {device_info['mem_total_mib']} MiB
+
+    **Kernel `busy_kernel`:** {kernel_regs} regs/thread · {kernel_smem} bytes shared mem
+    (light kernel — the resident-block ceiling is thread-limited, not register/smem-limited)
 
     **MPS daemon:** {'available — Mode B enabled' if mps_available else 'NOT available (likely WSL2) — Mode B disabled'}
     """
     )
     banner
-    return max_threads_per_sm_detected, mps_available, mps_helper, sm_count_detected
+    return (
+        kernel_regs,
+        kernel_smem,
+        max_blocks_per_sm,
+        max_threads_per_sm_detected,
+        mps_available,
+        mps_helper,
+        regs_per_sm,
+        smem_per_sm,
+        sm_count_detected,
+    )
 
 
 @app.cell
@@ -141,13 +169,37 @@ def _(mo, sm_count_detected):
 
 
 @app.cell
-def _(cpu_count, max_threads_per_sm_detected, mo, sm_count_input, threads_per_block_sel):
+def _(
+    cpu_count,
+    kernel_regs,
+    kernel_smem,
+    max_blocks_per_sm,
+    max_threads_per_sm_detected,
+    mo,
+    regs_per_sm,
+    smem_per_sm,
+    sm_count_input,
+    threads_per_block_sel,
+):
     threads_per_block = int(threads_per_block_sel.value)
     sm_count = int(sm_count_input.value)
 
-    # Concurrent-block capacity at full occupancy. Thread-limited: valid for
-    # threads_per_block >= 128, where the per-SM block cap (16-32) isn't binding.
-    blocks_per_sm = max(1, max_threads_per_sm_detected // threads_per_block)
+    # Concurrent-block capacity per SM is the *smallest* of four hardware ceilings,
+    # not just the thread count. A register- or shared-memory-heavy kernel hits one of
+    # the resource caps first, so its grid saturates the GPU at a lower block count.
+    # Resource caps are only included when their per-kernel input is known/positive
+    # (busy_kernel uses 0 shared mem, so the shared-mem cap simply doesn't apply).
+    occupancy_caps = {
+        "thread": max_threads_per_sm_detected // threads_per_block,
+        "block": max_blocks_per_sm,
+    }
+    if kernel_regs > 0:
+        occupancy_caps["register"] = regs_per_sm // (threads_per_block * kernel_regs)
+    if kernel_smem > 0 and smem_per_sm > 0:  # smem_per_sm == 0 means the device prop was unavailable
+        occupancy_caps["shared-mem"] = smem_per_sm // kernel_smem
+
+    blocks_per_sm = max(1, min(occupancy_caps.values()))
+    binding_cap = min(occupancy_caps, key=occupancy_caps.get)
     saturation_blocks = sm_count * blocks_per_sm
 
     # Block options expressed as fractions/multiples of the saturation point,
@@ -157,6 +209,7 @@ def _(cpu_count, max_threads_per_sm_detected, mo, sm_count_input, threads_per_bl
     block_option_strs = [str(b) for b in block_options]
     default_blocks = block_option_strs[::2] or [block_option_strs[0]]
     sat_caption = " · ".join(f"{b}={b / saturation_blocks * 100:.0f}%" for b in block_options)
+    caps_caption = ", ".join(f"{name} {cap}" for name, cap in occupancy_caps.items())
 
     # Worker options: powers of two up to CPU count (Mode A/B are process-bound).
     worker_options = []
@@ -185,6 +238,10 @@ def _(cpu_count, max_threads_per_sm_detected, mo, sm_count_input, threads_per_bl
 
     mo.vstack(
         [
+            mo.md(
+                f"*Resident-block ceiling = {blocks_per_sm} blocks/SM, set by the "
+                f"**{binding_cap} cap** (blocks/SM per cap: {caps_caption}).*"
+            ),
             mo.md(f"*Block options (% of saturation):* {sat_caption}"),
             blocks_sel,
             n_workers_sel,
@@ -195,6 +252,8 @@ def _(cpu_count, max_threads_per_sm_detected, mo, sm_count_input, threads_per_bl
         ]
     )
     return (
+        binding_cap,
+        blocks_per_sm,
         blocks_sel,
         enable_b,
         kernel_count_sel,
@@ -441,7 +500,7 @@ def _(mo):
 
 
 @app.cell
-def _(cmax_input, cmin_input, df, mo, n_for_heatmap, saturation_blocks, scale_mode):
+def _(cmax_input, cmin_input, df, n_for_heatmap, saturation_blocks, scale_mode):
     import plotly.graph_objects as go
     from plotly.subplots import make_subplots
     import numpy as np
@@ -578,6 +637,89 @@ def _(mo):
     Color scale: **auto-fit** spans every N in the sweep, so flipping the N selector
     keeps one comparable scale; **fixed** locks `cmin`/`cmax` for cross-sweep comparison.
     """)
+    return
+
+
+@app.cell
+def _(
+    binding_cap,
+    blocks_per_sm,
+    kernel_regs,
+    kernel_smem,
+    max_threads_per_sm_detected,
+    mo,
+    regs_per_sm,
+    threads_per_block,
+):
+    _occ_pct = blocks_per_sm * threads_per_block / max_threads_per_sm_detected * 100
+    mo.md(
+        rf"""
+    ### How to locate *your* kernel on the heatmap
+
+    The heatmap is generic. To use it for a real kernel, map that kernel onto the two
+    axes, then read the cell. Three steps + a sanity check.
+
+    **1 · Find your column (occupancy).** Two compiled properties of a kernel decide how
+    many of its thread-blocks fit on one SM at once — that ceiling sets where "saturation"
+    is, and your grid size relative to it is your column:
+
+    - *registers per thread* (`RawKernel.num_regs`) — each SM has a fixed register file
+      ({regs_per_sm // 1024}K 32-bit registers here); more registers per thread → fewer
+      resident threads.
+    - *shared memory per block* (`RawKernel.shared_size_bytes`) — each SM has fixed
+      shared memory; more per block → fewer resident blocks.
+
+    The resident-block ceiling is the **smallest** of four caps (this is what the
+    *Sweep configuration* banner computes for the active kernel):
+
+    ```text
+    blocks_per_SM = min(
+        threads_per_SM // threads_per_block,                 # thread cap
+        max_blocks_per_SM,                                   # hardware block cap
+        regs_per_SM // (threads_per_block * regs_per_thread),# register cap
+        smem_per_SM // smem_per_block,                       # shared-memory cap
+    )
+    saturation_blocks = SM_count * blocks_per_SM
+    ```
+
+    A kernel launched with `0.25 * saturation_blocks` sits in the 25% column.
+
+    > **Worked example — this demo's `busy_kernel`:** {kernel_regs} regs/thread,
+    > {kernel_smem} bytes shared mem. With these threads_per_block the **{binding_cap}
+    > cap** binds → {blocks_per_sm} blocks/SM → **{_occ_pct:.0f}% theoretical occupancy**.
+    > Because it's register/shared-mem-light, the thread cap is what binds, so the
+    > "grid size = occupancy" shorthand holds exactly (see `CONTEXT.md`). A
+    > register-heavy kernel would hit the *register* cap first, so the same grid size
+    > would fill the GPU at a lower block count — its column would shift right.
+
+    **2 · Find your row (duration regime).** Measure the kernel's steady-state GPU time:
+
+    ```python
+    from cupyx.profiler import benchmark
+    r = benchmark(lambda: my_kernel((grid,), (block,), args), n_repeat=100)
+    gpu_us = r.gpu_times.mean() * 1e6
+    ```
+
+    (or wrap launches in `cudaEventRecord` / `cudaEventElapsedTime`). Compare against
+    host launch overhead, ~5–10 µs per launch:
+
+    - GPU time **≪** launch overhead → **launch-bound** (bottom rows).
+    - GPU time **≫** launch overhead → **compute-bound** (top rows).
+
+    **3 · Read the cell.** With (column, row) in hand, read the **Mode C / Mode A**
+    value: **>1 (red)** means sharing the GPU across N workers should speed your
+    workload up; **≈1 (white)** means one kernel already fills the device and sharing
+    buys nothing.
+
+    **Sanity check — are you even in this heatmap's regime?** `busy_kernel` is pure
+    arithmetic (compute-bound, no global-memory traffic). Before trusting a cell, confirm
+    *your* kernel is too: estimate **arithmetic intensity** = FLOPs ÷ bytes moved from
+    global memory. If it's low, your kernel can stall on HBM bandwidth — a *memory-bound*
+    regime Phase 1 deliberately doesn't model (that's the Phase 2 demo). A quick tell:
+    if `ncu`/`nsys` shows high `dram__throughput` with low SM utilisation, you're
+    memory-bound and this heatmap won't predict your sharing behaviour.
+    """
+    )
     return
 
 

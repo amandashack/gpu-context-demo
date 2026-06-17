@@ -31,6 +31,10 @@ sm = props["multiProcessorCount"]
 clock_khz = props["clockRate"]
 mem_khz = props["memoryClockRate"]
 bus_bits = props["memoryBusWidth"]
+threads_per_sm = props.get("maxThreadsPerMultiProcessor", 2048)
+regs_per_sm = props.get("regsPerMultiprocessor", 65536)
+smem_per_sm = props.get("sharedMemPerMultiprocessor", 0)
+max_blocks_per_sm = props.get("maxBlocksPerMultiProcessor", 32)
 
 FP32_CORES_PER_SM = {(7, 0): 64, (7, 2): 64, (7, 5): 64,
                      (8, 0): 64, (8, 6): 128, (8, 9): 128, (9, 0): 128}
@@ -60,8 +64,21 @@ def report(label, src_ai, src_bytes, flops, t_s, kernel, predicted, note=""):
     frac_fl = gflops / peak_fp32_gflops
     spill = kernel.local_size_bytes
 
+    # Honest occupancy ceiling (same min() as the Phase 1 notebook), at BLOCK threads.
+    caps = {"thread": threads_per_sm // BLOCK, "block": max_blocks_per_sm}
+    if kernel.num_regs > 0:
+        caps["reg"] = regs_per_sm // (BLOCK * kernel.num_regs)
+    if kernel.shared_size_bytes > 0 and smem_per_sm > 0:
+        caps["smem"] = smem_per_sm // kernel.shared_size_bytes
+    blocks_per_sm = max(1, min(caps.values()))
+    binding = min(caps, key=caps.get)
+    occ_pct = blocks_per_sm * BLOCK / threads_per_sm * 100
+
     if apparent_gbps > peak_hbm_gbps * 1.1:
         measured = "cache-served (NOT DRAM-bound)"  # >100% of HBM is physically impossible
+    elif max(frac_bw, frac_fl) < 0.25:
+        # near neither roof: stalled on latency (memory/instruction), not throughput
+        measured = "latency-bound (saturates neither roof)"
     elif frac_bw >= frac_fl:
         measured = "HBM-bound"
     else:
@@ -72,6 +89,7 @@ def report(label, src_ai, src_bytes, flops, t_s, kernel, predicted, note=""):
     print(f"  source AI ~ {src_ai:6.2f} FLOPs/byte  -> predicted: {predicted}")
     print(f"  compile:   regs/thread={kernel.num_regs}  smem={kernel.shared_size_bytes}B  "
           f"spill(local)={spill}B")
+    print(f"  occupancy: {blocks_per_sm} blocks/SM = {occ_pct:.0f}%  (binding cap: {binding})")
     print(f"  measured:  {gflops:8.0f} GFLOP/s ({frac_fl*100:4.1f}% peak)   "
           f"apparent {apparent_gbps:7.0f} GB/s ({frac_bw*100:5.1f}% HBM)")
     print(f"  VERDICT:   {measured}" + ("   <-- TRAP (source guess was wrong)" if trap else ""))
@@ -206,6 +224,32 @@ t = measure(stride_kernel, (GRID,), (BLOCK,), (a_in, b, c, N))
 report("saxpy_strided", 2 / 12, 12 * N, 2 * N, t, stride_kernel, "HBM-bound",
        note="compare its GB/s to Exhibit 2's — same source, scattered addresses")
 
+# === Exhibit 6: shared memory — explicit on-chip reuse + its occupancy cost ====
+# Each thread reuses a block-local staging buffer many times. __shared__ is the
+# deliberate cousin of the L2 trap (Ex3): you choose to serve reuse on-chip. The
+# tradeoff: 32 KB/block consumes a per-SM resource, so the smem cap should now bind
+# the occupancy ceiling instead of the thread cap.
+smem_src = r"""
+extern "C" __global__ void smem_reuse(const float* in, float* out, int n) {
+    __shared__ float tile[8192];                 // 32 KB/block
+    int t = threadIdx.x;
+    int i = blockIdx.x*blockDim.x + t;
+    for (int k = t; k < 8192; k += blockDim.x)   // stage block's data into smem once
+        tile[k] = (i < n) ? in[i] : 0.0f;
+    __syncthreads();
+    float s = 0.0f;
+    #pragma unroll 1
+    for (int k = 0; k < 256; k++) s += tile[(t * 7 + k) & 8191];  // reuse from smem
+    if (i < n) out[i] = s;
+}
+"""
+smem_kernel = cp.RawKernel(smem_src, "smem_reuse")
+print("\n### Exhibit 6: shared memory (TELL — __shared__ + the occupancy it costs)")
+t = measure(smem_kernel, (GRID,), (BLOCK,), (a_in, a_out, N))
+report("smem_reuse", 256 / 8, 8 * N, 256 * N, t, smem_kernel, "compute-bound",
+       note="32 KB/block → watch the binding cap flip to 'smem'")
+
 print("\n" + "=" * 78)
-print("Read the TRAP lines: did L2-reuse exceed HBM peak? did the capped kernel")
-print("spill (local>0) and slow down? did strided GB/s fall well below SAXPY's?")
+print("Read the TRAP lines: did L2-reuse exceed HBM peak? did the runtime-index kernel")
+print("spill (local>0) and crater? did strided GB/s fall below SAXPY's? did Ex6's")
+print("binding cap flip to smem (occupancy < 100%)?")

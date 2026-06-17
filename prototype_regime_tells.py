@@ -157,16 +157,22 @@ extern "C" __global__ void reg_heavy(const float* in, float* out, int n) {
     out[i] = s;
 }
 """
+# Same body as reg_src, but __launch_bounds__(256, 16) forces ptxas to cap registers
+# at 65536/(256*16) = 16 — a hard constraint baked into the PTX, unlike --maxrregcount
+# which the NVRTC->driver-JIT path ignores here.
+reg_src_bounded = reg_src.replace(
+    "void reg_heavy(", "void __launch_bounds__(256, 16) reg_heavy_b("
+)
 flops_reg = 16 * 64 * 2 * N
 print("\n### Exhibit 4: register pressure (TRAP — spills only visible after compile)")
 reg_free = cp.RawKernel(reg_src, "reg_heavy")
 t = measure(reg_free, (GRID,), (BLOCK,), (a_in, a_out, N))
 report("reg_heavy (default)", flops_reg / (8 * N), 8 * N, flops_reg, t, reg_free,
        "compute-bound", note="no register cap")
-reg_capped = cp.RawKernel(reg_src, "reg_heavy", options=("--maxrregcount=16",))
-t = measure(reg_capped, (GRID,), (BLOCK,), (a_in, a_out, N))
-report("reg_heavy (capped 16)", flops_reg / (8 * N), 8 * N, flops_reg, t, reg_capped,
-       "compute-bound", note="--maxrregcount=16 < natural 23 → should spill")
+reg_bounded = cp.RawKernel(reg_src_bounded, "reg_heavy_b")
+t = measure(reg_bounded, (GRID,), (BLOCK,), (a_in, a_out, N))
+report("reg_heavy (launch_bounds 16)", flops_reg / (8 * N), 8 * N, flops_reg, t, reg_bounded,
+       "compute-bound", note="__launch_bounds__(256,16) caps regs at 16 → should spill")
 
 # === Exhibit 5: uncoalesced TRAP — same source shape as SAXPY, strided index ==
 stride_src = r"""

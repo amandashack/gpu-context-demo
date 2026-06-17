@@ -163,10 +163,10 @@ reg_free = cp.RawKernel(reg_src, "reg_heavy")
 t = measure(reg_free, (GRID,), (BLOCK,), (a_in, a_out, N))
 report("reg_heavy (default)", flops_reg / (8 * N), 8 * N, flops_reg, t, reg_free,
        "compute-bound", note="no register cap")
-reg_capped = cp.RawKernel(reg_src, "reg_heavy", options=("--maxrregcount=32",))
+reg_capped = cp.RawKernel(reg_src, "reg_heavy", options=("--maxrregcount=16",))
 t = measure(reg_capped, (GRID,), (BLOCK,), (a_in, a_out, N))
-report("reg_heavy (capped 32)", flops_reg / (8 * N), 8 * N, flops_reg, t, reg_capped,
-       "compute-bound", note="--maxrregcount=32 forces spills")
+report("reg_heavy (capped 16)", flops_reg / (8 * N), 8 * N, flops_reg, t, reg_capped,
+       "compute-bound", note="--maxrregcount=16 < natural 23 → should spill")
 
 # === Exhibit 5: uncoalesced TRAP — same source shape as SAXPY, strided index ==
 stride_src = r"""

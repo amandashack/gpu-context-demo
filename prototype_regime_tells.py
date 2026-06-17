@@ -157,22 +157,40 @@ extern "C" __global__ void reg_heavy(const float* in, float* out, int n) {
     out[i] = s;
 }
 """
-# Same body as reg_src, but __launch_bounds__(256, 16) forces ptxas to cap registers
-# at 65536/(256*16) = 16 — a hard constraint baked into the PTX, unlike --maxrregcount
-# which the NVRTC->driver-JIT path ignores here.
-reg_src_bounded = reg_src.replace(
-    "void reg_heavy(", "void __launch_bounds__(256, 16) reg_heavy_b("
-)
+# Same body as reg_heavy, but the inner index into r[] is RUNTIME-dependent (d). A
+# register file isn't addressable, so any array indexed by a runtime value is forced
+# into local memory -> local_size_bytes > 0. This is the reliable, toolchain-proof way
+# to show hidden memory traffic the source doesn't advertise (register caps via
+# --maxrregcount / __launch_bounds__ did NOT bind through CuPy's JIT path).
+reg_src_local = r"""
+extern "C" __global__ void reg_heavy_local(const float* in, float* out, int n) {
+    int i = blockIdx.x*blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    float r[16];
+    #pragma unroll
+    for (int j = 0; j < 16; j++) r[j] = in[i] * (1.0f + 0.01f*j);
+    #pragma unroll 1
+    for (int k = 0; k < 64; k++) {
+        int d = k & 15;   // runtime index -> r[] can't live in registers -> local memory
+        #pragma unroll
+        for (int j = 0; j < 16; j++) r[j] = fmaf(r[j], r[(j+d)&15], r[(j+7)&15]);
+    }
+    float s = 0.0f;
+    #pragma unroll
+    for (int j = 0; j < 16; j++) s += r[j];
+    out[i] = s;
+}
+"""
 flops_reg = 16 * 64 * 2 * N
-print("\n### Exhibit 4: register pressure (TRAP — spills only visible after compile)")
+print("\n### Exhibit 4: hidden local memory (TRAP — only the compile stat reveals it)")
 reg_free = cp.RawKernel(reg_src, "reg_heavy")
 t = measure(reg_free, (GRID,), (BLOCK,), (a_in, a_out, N))
-report("reg_heavy (default)", flops_reg / (8 * N), 8 * N, flops_reg, t, reg_free,
-       "compute-bound", note="no register cap")
-reg_bounded = cp.RawKernel(reg_src_bounded, "reg_heavy_b")
-t = measure(reg_bounded, (GRID,), (BLOCK,), (a_in, a_out, N))
-report("reg_heavy (launch_bounds 16)", flops_reg / (8 * N), 8 * N, flops_reg, t, reg_bounded,
-       "compute-bound", note="__launch_bounds__(256,16) caps regs at 16 → should spill")
+report("reg_heavy (static index)", flops_reg / (8 * N), 8 * N, flops_reg, t, reg_free,
+       "compute-bound", note="array indexed by compile-time j → stays in registers")
+reg_local = cp.RawKernel(reg_src_local, "reg_heavy_local")
+t = measure(reg_local, (GRID,), (BLOCK,), (a_in, a_out, N))
+report("reg_heavy (runtime index)", flops_reg / (8 * N), 8 * N, flops_reg, t, reg_local,
+       "compute-bound", note="one-char change: r[(j+d)] with d runtime → forced to local mem")
 
 # === Exhibit 5: uncoalesced TRAP — same source shape as SAXPY, strided index ==
 stride_src = r"""

@@ -70,6 +70,7 @@
   pre .c{color:var(--faint)}          /* comment */
   pre .k{color:var(--accent)}         /* keyword */
   pre .h{color:var(--warn)}           /* highlight */
+  pre.kernel{margin:.1rem 0 1.15rem; font-size:.8rem}   /* the kernel under analysis, top of each exhibit */
   .big{font-size:clamp(2rem,4.2vw,3.4rem); font-weight:800; font-family:var(--mono); letter-spacing:-.02em; line-height:1}
   .big.warn{color:var(--warn)} .big.good{color:var(--good)} .big.gold{color:var(--gold)} .big.cool{color:var(--accent)}
   .metric{margin:.2rem 0 1rem}
@@ -226,12 +227,19 @@
   <section class="slide">
     <div class="kicker">Exhibit 1 · the control · solve for the flip</div>
     <h2>AI-dial — the tell holds <span style="color:var(--good); font-size:1.1rem">✓</span></h2>
+<pre class="kernel"><span class="c">// kernel · ai_dial — read a float, run `iters` dependent FMAs, write it back</span>
+<span class="k">__global__</span> void ai_dial(const float* in, float* out, int n, int iters) {
+    int i = blockIdx.x*blockDim.x + threadIdx.x;
+    <span class="k">if</span> (i &lt; n) {
+        float x = in[i];
+        <span class="c">#pragma unroll 1</span>
+        <span class="k">for</span> (int k = 0; k &lt; iters; k++) x = fmaf(x, 1.0001f, 1e-7f);
+        out[i] = x;
+    }
+}</pre>
     <div class="split">
       <div class="panel tell">
         <div class="lbl"><span class="dot"></span>The tell · AI is a function of iters</div>
-<pre><span class="c">// 2 FLOPs/iter, 8 B I/O (1 read + 1 write)</span>
-<span class="k">for</span> (k = 0; k &lt; iters; k++)
-    x = fmaf(x, 1.0001f, 1e-7f);</pre>
 <pre>AI(iters) = (2·iters) / 8  =  <span class="h">iters / 4</span>
 
 iters/4 = 12.5  →  <span class="h">iters ≈ 50</span>   <span class="c">// hits the ridge</span>
@@ -244,7 +252,7 @@ iters &gt; 50  →  compute-bound</pre>
         <div class="metric"><span class="cap">iters = 8 → AI = 2</span><div class="big warn">72% HBM</div></div>
         <div class="metric"><span class="cap">iters = 64 → AI = 16</span><div class="big cool">compute-bound</div></div>
         <div class="verdict hold">flips across iters ≈ 50, exactly as predicted</div>
-        <p style="color:var(--dim); font-size:.92rem; margin-top:1rem; line-height:1.5"><b style="color:var(--gold)">The twist:</b> the compute end tops out at only <b style="color:var(--ink)">~39% of peak FP32</b> — a single dependent FMA chain has no ILP, so it's <b style="color:var(--warn)">latency-bound</b>, not at the roof. <i>Compute-bound ≠ peak →</i></p>
+        <p style="color:var(--dim); font-size:.92rem; margin-top:1rem; line-height:1.5"><b style="color:var(--gold)">The twist:</b> the compute end tops out at only <b style="color:var(--ink)">~39% of peak FP32</b> — a single dependent FMA chain has no ILP, so it's <b style="color:var(--warn)">latency-bound</b>, not at the roof. <i>Compute-bound ≠ peak.</i></p>
       </div>
     </div>
   </section>
@@ -282,11 +290,15 @@ iters &gt; 50  →  compute-bound</pre>
   <section class="slide">
     <div class="kicker">Exhibit 2 · the control</div>
     <h2>SAXPY — textbook HBM, the tell holds <span style="color:var(--good); font-size:1.1rem">✓</span></h2>
+<pre class="kernel"><span class="c">// kernel · saxpy — 2 reads, 1 write, 2 FLOPs per element</span>
+<span class="k">__global__</span> void saxpy(const float* a, const float* b, float* c, int n) {
+    int i = blockIdx.x*blockDim.x + threadIdx.x;
+    <span class="k">if</span> (i &lt; n) c[i] = 2.0f*a[i] + b[i];
+}</pre>
     <div class="split">
       <div class="panel tell">
         <div class="lbl"><span class="dot"></span>The tell</div>
-<pre><span class="k">c</span>[i] = 2.0f * a[i] + b[i];
-<span class="c">// 2 FLOPs, 12 bytes → AI = 0.17</span></pre>
+<pre>AI = 2 FLOPs / 12 B = <span class="h">0.17</span>   <span class="c">// far below ridge 12.5</span></pre>
         <p style="color:var(--dim); margin-top:.9rem; font-size:.95rem">Far below the ridge. Two reads, one write, almost no arithmetic. Prediction: HBM-bound, no surprises.</p>
       </div>
       <div class="panel reality ok">
@@ -325,12 +337,17 @@ iters &gt; 50  →  compute-bound</pre>
   <section class="slide">
     <div class="kicker">Exhibit 3 · <span class="star">★ star trap</span></div>
     <h2>L2-reuse — the source lies about HBM</h2>
+<pre class="kernel"><span class="c">// kernel · l2_reuse — re-read a small (4 MB) buffer `reuse` times</span>
+<span class="k">__global__</span> void l2_reuse(const float* small, float* out, int m, int reuse) {
+    int i = blockIdx.x*blockDim.x + threadIdx.x;
+    float acc = 0.0f;
+    <span class="c">#pragma unroll 1</span>
+    <span class="k">for</span> (int k = 0; k &lt; reuse; k++) acc += small[(i + k) % m];
+    out[i % m] = acc;
+}</pre>
     <div class="split">
       <div class="panel tell">
         <div class="lbl"><span class="dot"></span>The tell · "obviously HBM-bound"</div>
-<pre><span class="c">// re-reads a 4 MB buffer, reuse×</span>
-<span class="k">for</span> (k = 0; k &lt; reuse; k++)
-    acc += small[(i + k) % m];</pre>
 <pre>working set = m = 2^20 floats = <span class="h">4 MB</span>
 accesses    = N · reuse   (16M · 64 ≈ 1.07e9)
 src bytes   = 4·N·reuse ≈ <span class="h">4.29 GB</span>   <span class="c">// each access = DRAM read</span>
@@ -352,14 +369,20 @@ over-count = 4.29 GB / 4 MB ≈ <span class="h">1024×</span> served by L2</pre>
   <section class="slide">
     <div class="kicker">Exhibit 4 · the most dramatic trap</div>
     <h2>Register spill — a one-character change, 13× slower</h2>
+<pre class="kernel"><span class="c">// kernel · reg_heavy — 16-float private array, 64×16 dependent FMAs</span>
+<span class="k">__global__</span> void reg_heavy(const float* in, float* out, int n) {
+    int i = blockIdx.x*blockDim.x + threadIdx.x;  <span class="k">if</span> (i &gt;= n) return;
+    float r[16];                                  <span class="c">// 16·4 B = 64 B/thread</span>
+    <span class="k">for</span> (int j = 0; j &lt; 16; j++) r[j] = in[i]*(1.0f + 0.01f*j);
+    <span class="k">for</span> (int k = 0; k &lt; 64; k++)
+      <span class="k">for</span> (int j = 0; j &lt; 16; j++)
+        r[j] = fmaf(r[j], r[(j+<span class="k">1</span>)&amp;15], r[(j+7)&amp;15]);  <span class="c">// static idx → registers</span>
+    out[i] = r[0] + … + r[15];
+}
+<span class="c">// the trap — one char:  (j+</span><span class="h">d</span><span class="c">)&amp;15  with  int d = k&amp;15  → runtime idx → LOCAL mem</span></pre>
     <div class="split">
       <div class="panel tell">
         <div class="lbl"><span class="dot"></span>The tell · both look compute-bound</div>
-<pre><span class="c">// static index → stays in registers</span>
-r[j] = fmaf(r[j], r[(j+<span class="k">1</span>)&amp;15], …);
-
-<span class="c">// runtime index → forced to LOCAL mem</span>
-r[j] = fmaf(r[j], r[(j+<span class="h">d</span>)&amp;15], …);</pre>
 <pre>r[16] floats = 16 · 4 B = <span class="h">64 B / thread</span>
 ptxas → local_size_bytes = 64   <span class="c">// compile-time stat</span></pre>
         <p style="color:var(--dim); margin-top:.7rem; font-size:.89rem">A register file isn't addressable. A runtime index <code>d</code> forces <code>r[]</code> out of registers; <code>ptxas</code> spills it to local memory and reports the size.</p>
@@ -379,12 +402,15 @@ ptxas → local_size_bytes = 64   <span class="c">// compile-time stat</span></p
   <section class="slide">
     <div class="kicker">Exhibit 5 · the reframe</div>
     <h2>Uncoalesced — same regime, 20× off the roof</h2>
+<pre class="kernel"><span class="c">// kernel · saxpy_strided — the SAXPY body, but scatter the index</span>
+<span class="k">__global__</span> void saxpy_strided(const float* a, const float* b, float* c, int n) {
+    int t = blockIdx.x*blockDim.x + threadIdx.x;
+    int i = (t * <span class="h">131</span>) % n;                  <span class="c">// 131 floats = 524 B between neighbors</span>
+    <span class="k">if</span> (t &lt; n) c[i] = 2.0f*a[i] + b[i];
+}</pre>
     <div class="split">
       <div class="panel tell">
         <div class="lbl"><span class="dot"></span>The tell · identical to SAXPY</div>
-<pre><span class="c">// scatter consecutive threads</span>
-i = (t * <span class="h">131</span>) % n;
-c[i] = 2.0f*a[i] + b[i];</pre>
 <pre>AI = 2 FLOPs / 12 B = <span class="h">0.17</span>   <span class="c">// same as SAXPY</span>
 stride = 131 floats = 524 B between neighbors
 addresses don't appear in AI → predicts HBM-bound</pre>
@@ -407,11 +433,20 @@ strided:   32 threads → 32 sectors, 4 B used each
   <section class="slide">
     <div class="kicker">Exhibit 6 · the deliberate tell</div>
     <h2>Shared memory — locality you <em>choose</em>, occupancy you <em>pay</em></h2>
+<pre class="kernel"><span class="c">// kernel · smem_reuse — stage 32 KB/block into shared, then reuse 256×</span>
+<span class="k">__global__</span> void smem_reuse(const float* in, float* out, int n) {
+    <span class="k">__shared__</span> float tile[8192];                <span class="c">// 32 KB/block</span>
+    int t = threadIdx.x, i = blockIdx.x*blockDim.x + t;
+    <span class="k">for</span> (int k = t; k &lt; 8192; k += blockDim.x)
+        tile[k] = (i &lt; n) ? in[i] : 0.0f;         <span class="c">// stage once</span>
+    __syncthreads();
+    float s = 0.0f;
+    <span class="k">for</span> (int k = 0; k &lt; 256; k++) s += tile[(t*7 + k) &amp; 8191];  <span class="c">// reuse from smem</span>
+    <span class="k">if</span> (i &lt; n) out[i] = s;
+}</pre>
     <div class="split">
       <div class="panel tell">
         <div class="lbl"><span class="dot"></span>The tell · 32 KB/block staging buffer</div>
-<pre><span class="k">__shared__</span> float tile[8192]; <span class="c">// 32 KB</span>
-<span class="c">// stage once, reuse 256× from smem</span></pre>
         <p style="color:var(--dim); margin-top:.9rem; font-size:.92rem">The chosen cousin of the Ex3 L2 trap: deliberate on-chip reuse. But <code>__shared__</code> consumes a per-SM resource.</p>
       </div>
       <div class="panel reality ok">

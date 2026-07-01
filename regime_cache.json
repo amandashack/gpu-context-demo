@@ -1,0 +1,27 @@
+{
+  "_comment": "Captured from prototype_regime_tells.py on NVIDIA A100-SXM4-40GB (CC 8.0, 108 SMs). GFLOP/s and apparent GB/s are the prototype's rounded prints; occupancy is recomputed from num_regs/smem so it needs no extra capture. Regenerated live by gpu_kernel_regimes.py when a GPU is present.",
+  "peaks": {
+    "name": "NVIDIA A100-SXM4-40GB",
+    "cc": "8.0",
+    "sm": 108,
+    "threads_per_sm": 2048,
+    "regs_per_sm": 65536,
+    "smem_per_sm": 167936,
+    "max_blocks_per_sm": 32,
+    "peak_fp32_gflops": 19491.8,
+    "peak_hbm_gbps": 1555.2,
+    "cached": true
+  },
+  "measured": {
+    "ai_dial@1":     {"gflops": 303,   "apparent_gbps": 1214, "num_regs": 9,  "smem": 0,     "spill": 0},
+    "ai_dial@8":     {"gflops": 2255,  "apparent_gbps": 1127, "num_regs": 9,  "smem": 0,     "spill": 0},
+    "ai_dial@64":    {"gflops": 6252,  "apparent_gbps": 391,  "num_regs": 9,  "smem": 0,     "spill": 0},
+    "ai_dial@512":   {"gflops": 6877,  "apparent_gbps": 54,   "num_regs": 9,  "smem": 0,     "spill": 0},
+    "saxpy":         {"gflops": 215,   "apparent_gbps": 1287, "num_regs": 12, "smem": 0,     "spill": 0},
+    "l2_reuse":      {"gflops": 679,   "apparent_gbps": 2717, "num_regs": 17, "smem": 0,     "spill": 0},
+    "reg_static":    {"gflops": 18190, "apparent_gbps": 71,   "num_regs": 23, "smem": 0,     "spill": 0},
+    "reg_runtime":   {"gflops": 1362,  "apparent_gbps": 5,    "num_regs": 31, "smem": 0,     "spill": 64},
+    "saxpy_strided": {"gflops": 11,    "apparent_gbps": 65,   "num_regs": 18, "smem": 0,     "spill": 0},
+    "smem_reuse":    {"gflops": 1878,  "apparent_gbps": 59,   "num_regs": 10, "smem": 32768, "spill": 0}
+  }
+}

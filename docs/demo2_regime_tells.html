@@ -1,0 +1,479 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Demo 2 — Regime Tells vs Traps</title>
+<style>
+  :root{
+    --bg:#0a0e14; --bg2:#11161f; --panel:#151b26; --line:#222c3a;
+    --ink:#e6edf3; --dim:#8b9bb0; --faint:#5c6b80;
+    --accent:#5ad1ff;            /* tell / cool */
+    --warn:#ff8a5b;              /* trap / warm */
+    --good:#6ee7a8;              /* confirmed */
+    --gold:#ffd35a;              /* star */
+    --mono:'SF Mono',ui-monospace,'JetBrains Mono','Fira Code',Menlo,Consolas,monospace;
+    --sans:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html,body{height:100%}
+  body{
+    background:var(--bg); color:var(--ink); font-family:var(--sans);
+    overflow:hidden; -webkit-font-smoothing:antialiased;
+  }
+  /* ---- deck mechanics ---------------------------------------------------- */
+  .deck{height:100vh;width:100vw;position:relative}
+  .slide{
+    position:absolute; inset:0; display:none;
+    flex-direction:column; justify-content:center;
+    padding:5vh 7vw; opacity:0; transition:opacity .35s ease;
+  }
+  .slide.active{display:flex; opacity:1}
+  .slide h1,.slide h2{line-height:1.08; letter-spacing:-.02em}
+  .kicker{
+    font-family:var(--mono); font-size:.8rem; letter-spacing:.22em;
+    text-transform:uppercase; color:var(--faint); margin-bottom:1.1rem;
+  }
+  h1{font-size:clamp(2.4rem,5.5vw,4.6rem); font-weight:800}
+  h2{font-size:clamp(1.7rem,3.4vw,2.7rem); font-weight:700; margin-bottom:1.4rem}
+  .sub{color:var(--dim); font-size:clamp(1.05rem,1.7vw,1.45rem); max-width:60ch; line-height:1.5}
+  p{line-height:1.55}
+  /* ---- chrome ----------------------------------------------------------- */
+  .bar{position:fixed; bottom:0; left:0; right:0; height:3px; background:var(--line); z-index:30}
+  .bar > i{display:block; height:100%; background:linear-gradient(90deg,var(--accent),var(--warn)); transition:width .35s ease}
+  .nav{position:fixed; bottom:18px; right:26px; font-family:var(--mono); font-size:.8rem; color:var(--faint); z-index:30}
+  .nav b{color:var(--ink)}
+  .tag{position:fixed; bottom:18px; left:26px; font-family:var(--mono); font-size:.78rem; letter-spacing:.18em; text-transform:uppercase; color:var(--faint); z-index:30}
+  /* ---- panels ----------------------------------------------------------- */
+  .split{display:grid; grid-template-columns:1fr 1fr; gap:2rem; margin-top:.6rem}
+  .panel{
+    background:var(--panel); border:1px solid var(--line); border-radius:14px;
+    padding:1.6rem 1.7rem; position:relative;
+  }
+  .panel .lbl{
+    font-family:var(--mono); font-size:.72rem; letter-spacing:.2em; text-transform:uppercase;
+    display:flex; align-items:center; gap:.55rem; margin-bottom:1rem;
+  }
+  .dot{width:9px;height:9px;border-radius:50%}
+  .tell .lbl{color:var(--accent)}     .tell .dot{background:var(--accent)}
+  .tell{border-color:#1c3a48}
+  .reality .lbl{color:var(--warn)}    .reality .dot{background:var(--warn)}
+  .reality{border-color:#3a2a1c}
+  .reality.ok .lbl{color:var(--good)} .reality.ok .dot{background:var(--good)}
+  .reality.ok{border-color:#1f3a2c}
+  code,.code{font-family:var(--mono)}
+  pre{
+    font-family:var(--mono); font-size:.82rem; line-height:1.5; color:#cdd9e5;
+    background:var(--bg2); border:1px solid var(--line); border-radius:9px;
+    padding:.9rem 1rem; overflow:auto; white-space:pre;
+  }
+  pre .c{color:var(--faint)}          /* comment */
+  pre .k{color:var(--accent)}         /* keyword */
+  pre .h{color:var(--warn)}           /* highlight */
+  .big{font-size:clamp(2rem,4.2vw,3.4rem); font-weight:800; font-family:var(--mono); letter-spacing:-.02em; line-height:1}
+  .big.warn{color:var(--warn)} .big.good{color:var(--good)} .big.gold{color:var(--gold)} .big.cool{color:var(--accent)}
+  .metric{margin:.2rem 0 1rem}
+  .metric .cap{font-size:.78rem; color:var(--faint); font-family:var(--mono); letter-spacing:.12em; text-transform:uppercase}
+  ul.clean{list-style:none; margin-top:.4rem}
+  ul.clean li{padding:.45rem 0 .45rem 1.5rem; position:relative; color:var(--dim); line-height:1.5}
+  ul.clean li::before{content:'›'; position:absolute; left:0; color:var(--faint)}
+  ul.clean li b{color:var(--ink); font-weight:600}
+  .verdict{
+    margin-top:1.1rem; font-family:var(--mono); font-size:.95rem; padding:.7rem 1rem;
+    border-radius:9px; border:1px solid var(--line); display:inline-flex; gap:.6rem; align-items:center;
+  }
+  .verdict.trap{color:var(--warn); border-color:#3a2a1c; background:#1a120c}
+  .verdict.hold{color:var(--good); border-color:#1f3a2c; background:#0d1a13}
+  /* ---- title slide ------------------------------------------------------ */
+  .title-wrap{max-width:24ch}
+  .title-wrap .gradient{background:linear-gradient(100deg,var(--accent),var(--gold) 60%,var(--warn)); -webkit-background-clip:text; background-clip:text; color:transparent}
+  .meta-row{margin-top:2.4rem; display:flex; gap:2.4rem; font-family:var(--mono); font-size:.85rem; color:var(--faint)}
+  .meta-row b{color:var(--dim); display:block; font-size:.72rem; letter-spacing:.14em; text-transform:uppercase; margin-bottom:.3rem}
+  /* ---- knob/regime cards ------------------------------------------------ */
+  .cards{display:grid; grid-template-columns:repeat(3,1fr); gap:1.4rem; margin-top:1.6rem}
+  .card{background:var(--panel); border:1px solid var(--line); border-radius:14px; padding:1.5rem}
+  .card .n{font-family:var(--mono); font-size:.8rem; color:var(--faint); letter-spacing:.1em}
+  .card h3{font-size:1.35rem; margin:.5rem 0 .7rem}
+  .card p{color:var(--dim); font-size:.98rem}
+  .card .ex{margin-top:.9rem; font-family:var(--mono); font-size:.74rem; color:var(--faint)}
+  .arrow{color:var(--faint); font-family:var(--mono); text-align:center; margin:1.3rem 0 .2rem; letter-spacing:.1em; font-size:.85rem}
+  /* ---- roofline svg ----------------------------------------------------- */
+  .roof-wrap{display:grid; grid-template-columns:1.1fr .9fr; gap:2.4rem; align-items:center; margin-top:1rem}
+  .legend{font-family:var(--mono); font-size:.9rem; line-height:2}
+  .legend i{display:inline-block; width:12px; height:12px; border-radius:3px; margin-right:.6rem; vertical-align:middle}
+  /* ---- synthesis -------------------------------------------------------- */
+  .thesis{font-size:clamp(1.3rem,2.4vw,1.9rem); line-height:1.5; max-width:30ch; font-weight:600}
+  .thesis .hl{color:var(--accent)}
+  .row3{display:grid; grid-template-columns:repeat(3,1fr); gap:1.2rem; margin-top:1.8rem; font-family:var(--mono); font-size:.95rem}
+  .row3 div{background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:1rem 1.1rem; color:var(--dim)}
+  .row3 b{color:var(--ink)}
+  .star{color:var(--gold)}
+</style>
+</head>
+<body>
+<div class="deck" id="deck">
+
+  <!-- 1 — TITLE -->
+  <section class="slide active">
+    <div class="title-wrap">
+      <div class="kicker">GPU Context Demo · Phase 2</div>
+      <h1>Regime <span class="gradient">tells</span> vs <span class="gradient">traps</span></h1>
+      <p class="sub" style="margin-top:1.4rem">Read a kernel's source, guess where it bottlenecks. Sometimes the guess is a <span style="color:var(--accent)">tell</span>. Sometimes it's a <span style="color:var(--warn)">trap</span> only measurement can spring.</p>
+      <div class="meta-row">
+        <div><b>Device</b>NVIDIA A100-SXM4-40GB</div>
+        <div><b>Compute</b>CC 8.0 · 108 SMs</div>
+        <div><b>Peaks</b>19.5 TFLOP/s · 1555 GB/s</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 2 — PREMISE -->
+  <section class="slide">
+    <div class="kicker">The premise</div>
+    <h2>You can read the source and form a hypothesis.<br>You cannot trust it.</h2>
+    <div class="split">
+      <div class="panel tell">
+        <div class="lbl"><span class="dot"></span>The tell</div>
+        <p style="color:var(--dim); line-height:1.6">Count FLOPs and bytes straight from the source → <b style="color:var(--ink)">arithmetic intensity</b>. Place it against the roofline <b style="color:var(--ink)">ridge</b> (peak compute ÷ peak BW ≈ 12.5 FLOPs/byte on the A100) for a source-level guess at the <b style="color:var(--ink)">regime</b>:</p>
+        <ul class="clean" style="font-size:.92rem; margin-top:.6rem">
+          <li><b style="color:var(--warn)">HBM-bound</b> — AI below the ridge; device DRAM bandwidth is the ceiling</li>
+          <li><b style="color:var(--accent)">compute-bound</b> — AI above the ridge; SM FP32 units are the ceiling</li>
+          <li><b style="color:var(--gold)">latency-bound</b> — a third regime the 2-axis roofline can't draw: under <i>both</i> roofs, pipeline starved. Predicted from compile stats + occupancy, not AI.</li>
+        </ul>
+      </div>
+      <div class="panel reality">
+        <div class="lbl"><span class="dot"></span>The reality</div>
+        <p style="color:var(--dim); line-height:1.6">The real operating point comes from <b style="color:var(--ink)">measurement</b>: achieved GFLOP/s, apparent GB/s, occupancy, and the <code>local/regs/smem</code> compile stats. They confirm the tell — or expose a trap.</p>
+      </div>
+    </div>
+    <div class="verdict hold" style="margin-top:1.6rem">Thesis &nbsp;·&nbsp; source = hypothesis &nbsp;→&nbsp; compile stats + occupancy + a measurement = the verdict</div>
+  </section>
+
+  <!-- 3 — THE BENCH / ROOFLINE -->
+  <section class="slide">
+    <div class="kicker">The bench · A100 roofline</div>
+    <h2>Two roofs, a ridge — and a third regime</h2>
+    <div class="roof-wrap" style="align-items:center">
+      <svg viewBox="0 0 520 340" width="100%" style="max-height:46vh">
+        <!-- axes -->
+        <line x1="60" y1="20" x2="60" y2="290" stroke="#2a3646" stroke-width="1.5"/>
+        <line x1="60" y1="290" x2="500" y2="290" stroke="#2a3646" stroke-width="1.5"/>
+        <!-- HBM slope -->
+        <line x1="60" y1="290" x2="250" y2="70" stroke="#ff8a5b" stroke-width="3"/>
+        <!-- compute roof -->
+        <line x1="250" y1="70" x2="500" y2="70" stroke="#5ad1ff" stroke-width="3"/>
+        <!-- ridge marker -->
+        <line x1="250" y1="70" x2="250" y2="290" stroke="#5c6b80" stroke-width="1" stroke-dasharray="4 4"/>
+        <circle cx="250" cy="70" r="5" fill="#ffd35a"/>
+        <!-- labels -->
+        <text x="120" y="160" fill="#ff8a5b" font-family="monospace" font-size="13" transform="rotate(-40 120 160)">HBM 1555 GB/s</text>
+        <text x="330" y="58" fill="#5ad1ff" font-family="monospace" font-size="13">compute 19.5 TFLOP/s</text>
+        <text x="258" y="62" fill="#ffd35a" font-family="monospace" font-size="11">(12.5, 19.5)</text>
+        <text x="206" y="312" fill="#ffd35a" font-family="monospace" font-size="12">ridge ≈ 12.5</text>
+        <text x="250" y="335" fill="#5c6b80" font-family="monospace" font-size="12" text-anchor="middle">arithmetic intensity (FLOPs / byte) →</text>
+        <text x="24" y="160" fill="#5c6b80" font-family="monospace" font-size="12" transform="rotate(-90 24 160)">GFLOP/s →</text>
+      </svg>
+      <div style="display:flex; flex-direction:column; gap:1.1rem">
+        <div class="panel tell" style="padding:1.2rem 1.4rem">
+          <div class="lbl"><span class="dot"></span>The ridge is a device constant</div>
+<pre>ridge = peak compute / peak BW
+      = 19.5 TFLOP/s / 1555 GB/s
+      ≈ 12.5 FLOPs/byte</pre>
+          <p style="color:var(--dim); font-size:.9rem; margin-top:.7rem">below → <span style="color:var(--warn)">HBM-bound</span> &nbsp;·&nbsp; above → <span style="color:var(--accent)">compute-bound</span></p>
+        </div>
+        <div class="panel" style="padding:1.2rem 1.4rem; border-color:#3a3320">
+          <div class="lbl" style="color:var(--gold)"><span class="dot" style="background:var(--gold)"></span>The third regime · latency-bound</div>
+          <p style="color:var(--dim); font-size:.92rem; line-height:1.55">The roofline assumes the pipeline is always fed — enough independent work in flight to hide each op's latency. When it isn't, you saturate <b style="color:var(--ink)">neither</b> roof: the SMs sit idle, waiting.</p>
+          <p style="color:var(--faint); font-size:.84rem; line-height:1.55; margin-top:.55rem">Causes: dependent chains (low ILP), too few warps (low occupancy), uncoalesced access, register spills. &nbsp;Flagged when <code>max(frac_bw, frac_fl) &lt; 0.25</code>.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 4 — TWO THREES -->
+  <section class="slide">
+    <div class="kicker">The frame · three knobs, three regimes</div>
+    <h2>Knob picks the roof · moves the roof · decides if you reach it</h2>
+    <div class="cards">
+      <div class="card">
+        <div class="n">KNOB 1</div>
+        <h3 style="color:var(--accent)">Arithmetic intensity</h3>
+        <p>FLOPs per byte — your horizontal position. Picks <b>which roof</b> you sit under.</p>
+        <div class="ex">Ex1 AI-dial · Ex2 SAXPY</div>
+      </div>
+      <div class="card">
+        <div class="n">KNOB 2</div>
+        <h3 style="color:var(--gold)">Data locality</h3>
+        <p>Where the bytes are <b>actually served from</b>. Reuse can lift effective BW above the DRAM roof.</p>
+        <div class="ex">Ex3 L2-reuse · Ex6 shared mem</div>
+      </div>
+      <div class="card">
+        <div class="n">KNOB 3</div>
+        <h3 style="color:var(--warn)">Access efficiency</h3>
+        <p>Coalescing &amp; register pressure. Decides if you <b>reach the roof</b> or fall below both.</p>
+        <div class="ex">Ex4 spill · Ex5 uncoalesced</div>
+      </div>
+    </div>
+    <div class="arrow">↓ producing ↓</div>
+    <div class="row3">
+      <div><b style="color:var(--accent)">compute-bound</b> — SM units saturated</div>
+      <div><b style="color:var(--warn)">HBM-bound</b> — device DRAM saturated</div>
+      <div><b style="color:var(--gold)">latency-bound</b> — under neither roof</div>
+    </div>
+  </section>
+
+  <!-- 5 — EX1 AI-DIAL: crossover -->
+  <section class="slide">
+    <div class="kicker">Exhibit 1 · the control · solve for the flip</div>
+    <h2>AI-dial — the tell holds <span style="color:var(--good); font-size:1.1rem">✓</span></h2>
+    <div class="split">
+      <div class="panel tell">
+        <div class="lbl"><span class="dot"></span>The tell · AI is a function of iters</div>
+<pre><span class="c">// 2 FLOPs/iter, 8 B I/O (1 read + 1 write)</span>
+<span class="k">for</span> (k = 0; k &lt; iters; k++)
+    x = fmaf(x, 1.0001f, 1e-7f);</pre>
+<pre>AI(iters) = (2·iters) / 8  =  <span class="h">iters / 4</span>
+
+iters/4 = 12.5  →  <span class="h">iters ≈ 50</span>   <span class="c">// hits the ridge</span>
+
+iters &lt; 50  →  HBM-bound
+iters &gt; 50  →  compute-bound</pre>
+      </div>
+      <div class="panel reality ok">
+        <div class="lbl"><span class="dot"></span>The reality · verdict flips on schedule</div>
+        <div class="metric"><span class="cap">iters = 8 → AI = 2</span><div class="big warn">72% HBM</div></div>
+        <div class="metric"><span class="cap">iters = 64 → AI = 16</span><div class="big cool">compute-bound</div></div>
+        <div class="verdict hold">flips across iters ≈ 50, exactly as predicted</div>
+        <p style="color:var(--dim); font-size:.92rem; margin-top:1rem; line-height:1.5"><b style="color:var(--gold)">The twist:</b> the compute end tops out at only <b style="color:var(--ink)">~39% of peak FP32</b> — a single dependent FMA chain has no ILP, so it's <b style="color:var(--warn)">latency-bound</b>, not at the roof. <i>Compute-bound ≠ peak →</i></p>
+      </div>
+    </div>
+  </section>
+
+  <!-- 6 — EX1 knobs -->
+  <section class="slide">
+    <div class="kicker">Exhibit 1 · two regimes, two knob sets</div>
+    <h2>The roofline says which ceiling. The fix differs completely.</h2>
+    <div class="split">
+      <div class="panel reality">
+        <div class="lbl"><span class="dot"></span>HBM-bound · iters &lt; 50 · limited by bytes</div>
+        <p style="color:var(--faint); font-size:.86rem; margin:-.4rem 0 .2rem">You can't out-compute a memory wall — adding FLOPs is free until the ridge.</p>
+        <ul class="clean" style="font-size:.94rem">
+          <li><b>Move fewer bytes</b> — fp16/bf16 (~2× BW); fuse kernels to kill DRAM round-trips <i>(biggest lever)</i></li>
+          <li><b>Move them efficiently</b> — keep loads coalesced (Ex5: 20× swing); vectorize (<code>float4</code> / 128-bit)</li>
+          <li><b>Saturate the bus</b> — enough in-flight requests (occupancy / MLP)</li>
+          <li><b>Or leave the regime</b> — raise AI past the ridge</li>
+        </ul>
+      </div>
+      <div class="panel tell">
+        <div class="lbl"><span class="dot"></span>compute-bound · iters &gt; 50 · limited by latency</div>
+        <p style="color:var(--faint); font-size:.86rem; margin:-.4rem 0 .2rem">The 39% wall: <code>unroll 1</code> serializes the FMA chain (~4 cyc each), pipeline idles.</p>
+        <ul class="clean" style="font-size:.94rem">
+          <li><b>Increase ILP</b> — split the chain into independent accumulators <i>(headline knob)</i></li>
+          <li><b>Increase TLP / occupancy</b> — more warps hide latency (ILP &amp; TLP substitute)</li>
+          <li><b>Never spill</b> — keep work in registers (Ex4: 13× from one spill); watch <code>local == 0</code></li>
+          <li><b>Right instructions</b> — <code>fmaf</code>, avoid div/transcendentals; tensor cores for matmul</li>
+        </ul>
+      </div>
+    </div>
+    <div class="verdict hold" style="margin-top:1.2rem">Bytes are irrelevant once compute-bound; ILP is irrelevant when HBM-bound. Know the regime before you tune.</div>
+  </section>
+
+  <!-- 6 — EX2 SAXPY -->
+  <section class="slide">
+    <div class="kicker">Exhibit 2 · the control</div>
+    <h2>SAXPY — textbook HBM, the tell holds <span style="color:var(--good); font-size:1.1rem">✓</span></h2>
+    <div class="split">
+      <div class="panel tell">
+        <div class="lbl"><span class="dot"></span>The tell</div>
+<pre><span class="k">c</span>[i] = 2.0f * a[i] + b[i];
+<span class="c">// 2 FLOPs, 12 bytes → AI = 0.17</span></pre>
+        <p style="color:var(--dim); margin-top:.9rem; font-size:.95rem">Far below the ridge. Two reads, one write, almost no arithmetic. Prediction: HBM-bound, no surprises.</p>
+      </div>
+      <div class="panel reality ok">
+        <div class="lbl"><span class="dot"></span>The reality</div>
+        <div class="metric"><span class="cap">achieved bandwidth</span><div class="big good">83% of HBM peak</div></div>
+        <p style="color:var(--dim); font-size:.95rem">Clean HBM-bound. This is the reference point — the honest version of the roof you <i>can</i> reach with coalesced streaming access.</p>
+        <div class="verdict hold">tell holds — keep this number, Ex5 will wreck it</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 8 — EX2 offload economics -->
+  <section class="slide">
+    <div class="kicker">Exhibit 2 · should it even run on the GPU?</div>
+    <h2>The regime says <em>how</em> it runs — not <em>where</em> it should</h2>
+    <div class="cards" style="margin-top:.2rem">
+      <div class="card"><div class="n">CPU DRAM</div><div class="big cool" style="font-size:1.9rem; margin:.4rem 0">~200 GB/s</div><p style="font-size:.9rem">where host data lives</p></div>
+      <div class="card" style="border-color:#3a2a1c"><div class="n">PCIe Gen4 ×16</div><div class="big warn" style="font-size:1.9rem; margin:.4rem 0">~25 GB/s</div><p style="font-size:.9rem">the transfer tax</p></div>
+      <div class="card"><div class="n">GPU HBM</div><div class="big good" style="font-size:1.9rem; margin:.4rem 0">~1555 GB/s</div><p style="font-size:.9rem">where device data lives</p></div>
+    </div>
+    <div class="split" style="margin-top:1.3rem">
+      <div class="panel tell">
+        <div class="lbl"><span class="dot"></span>data already on the GPU → GPU wins</div>
+        <p style="color:var(--dim); font-size:.95rem; line-height:1.55">1555 vs 200 GB/s ≈ <b style="color:var(--ink)">~8× faster</b>. No PCIe in the loop — the on-device roof is the only ceiling.</p>
+      </div>
+      <div class="panel reality">
+        <div class="lbl"><span class="dot"></span>data in CPU RAM → CPU wins</div>
+        <p style="color:var(--dim); font-size:.95rem; line-height:1.55">Crossing PCIe at 25 GB/s costs more than the trivial math. For SAXPY this is the classic <b style="color:var(--warn)">"not worth offloading"</b> case.</p>
+      </div>
+    </div>
+    <div class="verdict trap" style="margin-top:1.2rem">PCIe ridge: 19.5 TFLOP/s ÷ 25 GB/s ≈ <b>780 FLOPs/byte</b> to amortize the transfer. SAXPY's 0.17 is ~4600× short.</div>
+    <p class="sub" style="margin-top:.9rem; font-size:1.05rem"><b style="color:var(--accent)">Compute-bound kernels</b> are where the GPU wins decisively — amortize the one-time transfer over a mountain of compute and the PCIe tax vanishes.</p>
+  </section>
+
+  <!-- 7 — EX3 L2 REUSE (STAR) -->
+  <section class="slide">
+    <div class="kicker">Exhibit 3 · <span class="star">★ star trap</span></div>
+    <h2>L2-reuse — the source lies about HBM</h2>
+    <div class="split">
+      <div class="panel tell">
+        <div class="lbl"><span class="dot"></span>The tell · "obviously HBM-bound"</div>
+<pre><span class="c">// re-reads a 4 MB buffer, reuse×</span>
+<span class="k">for</span> (k = 0; k &lt; reuse; k++)
+    acc += small[(i + k) % m];</pre>
+<pre>working set = m = 2^20 floats = <span class="h">4 MB</span>
+accesses    = N · reuse   (16M · 64 ≈ 1.07e9)
+src bytes   = 4·N·reuse ≈ <span class="h">4.29 GB</span>   <span class="c">// each access = DRAM read</span>
+source AI   = 1 add / 4 B = 0.25 FLOPs/byte → HBM-bound</pre>
+      </div>
+      <div class="panel reality">
+        <div class="lbl"><span class="dot"></span>The reality · physically impossible</div>
+        <div class="metric"><span class="cap">apparent BW = src bytes / time</span><div class="big gold">2726 GB/s</div></div>
+        <div class="metric"><span class="cap">= fraction of HBM peak</span><div class="big warn">175%</div></div>
+<pre>2726 / 1555 = 1.75  →  can't come from DRAM
+4 MB working set ⊂ 40 MB L2  →  real DRAM ≈ 4 MB
+over-count = 4.29 GB / 4 MB ≈ <span class="h">1024×</span> served by L2</pre>
+      </div>
+    </div>
+    <div class="verdict trap" style="margin-top:1.2rem">TRAP — source says HBM-bound; reality is cache-served. Locality moved the roof.</div>
+  </section>
+
+  <!-- 8 — EX4 REGISTER SPILL -->
+  <section class="slide">
+    <div class="kicker">Exhibit 4 · the most dramatic trap</div>
+    <h2>Register spill — a one-character change, 13× slower</h2>
+    <div class="split">
+      <div class="panel tell">
+        <div class="lbl"><span class="dot"></span>The tell · both look compute-bound</div>
+<pre><span class="c">// static index → stays in registers</span>
+r[j] = fmaf(r[j], r[(j+<span class="k">1</span>)&amp;15], …);
+
+<span class="c">// runtime index → forced to LOCAL mem</span>
+r[j] = fmaf(r[j], r[(j+<span class="h">d</span>)&amp;15], …);</pre>
+<pre>r[16] floats = 16 · 4 B = <span class="h">64 B / thread</span>
+ptxas → local_size_bytes = 64   <span class="c">// compile-time stat</span></pre>
+        <p style="color:var(--dim); margin-top:.7rem; font-size:.89rem">A register file isn't addressable. A runtime index <code>d</code> forces <code>r[]</code> out of registers; <code>ptxas</code> spills it to local memory and reports the size.</p>
+      </div>
+      <div class="panel reality">
+        <div class="lbl"><span class="dot"></span>The reality · register → memory</div>
+        <div class="metric"><span class="cap">static index · operands in registers</span><div class="big cool">18211 GFLOP/s</div></div>
+        <div class="metric"><span class="cap">runtime index · local = 64 B/thread</span><div class="big warn">1362 GFLOP/s</div></div>
+        <p style="color:var(--gold); font-size:1rem; font-weight:600; margin-bottom:.5rem">13× slowdown — identical FLOPs.</p>
+        <p style="color:var(--dim); font-size:.87rem; line-height:1.5">Local is a logical space — backed by DRAM, cached in L1. Each FMA now <b style="color:var(--ink)">waits on a load</b> instead of reading a free register: added latency, not bandwidth, craters it.</p>
+      </div>
+    </div>
+    <div class="verdict trap" style="margin-top:1.1rem">TRAP — the disguise stays "compute-bound"; only <code>local_size_bytes &gt; 0</code> reveals the register→memory spill that reads latency-bound.</div>
+  </section>
+
+  <!-- 9 — EX5 UNCOALESCED -->
+  <section class="slide">
+    <div class="kicker">Exhibit 5 · the reframe</div>
+    <h2>Uncoalesced — same regime, 20× off the roof</h2>
+    <div class="split">
+      <div class="panel tell">
+        <div class="lbl"><span class="dot"></span>The tell · identical to SAXPY</div>
+<pre><span class="c">// scatter consecutive threads</span>
+i = (t * <span class="h">131</span>) % n;
+c[i] = 2.0f*a[i] + b[i];</pre>
+<pre>AI = 2 FLOPs / 12 B = <span class="h">0.17</span>   <span class="c">// same as SAXPY</span>
+stride = 131 floats = 524 B between neighbors
+addresses don't appear in AI → predicts HBM-bound</pre>
+      </div>
+      <div class="panel reality">
+        <div class="lbl"><span class="dot"></span>The reality · 32-byte sectors</div>
+<pre>warp = 32 threads; HBM moves <span class="h">32 B sectors</span>
+coalesced: 32 floats = 128 B = 4 full sectors (100%)
+strided:   32 threads → 32 sectors, 4 B used each
+           = 4/32 = <span class="h">12.5%</span> useful per fetch</pre>
+        <div class="metric"><span class="cap">coalesced (SAXPY)</span><div class="big good">1291 GB/s</div></div>
+        <div class="metric"><span class="cap">strided (scattered)</span><div class="big warn">65 GB/s</div></div>
+        <p style="color:var(--dim); font-size:.9rem">~20× collapse — and both still classify <b style="color:var(--ink)">HBM-bound</b>, the label does <i>not</i> flip.</p>
+      </div>
+    </div>
+    <div class="verdict trap" style="margin-top:1.1rem">Reframe — coalescing decides whether you reach <b>83%</b> or <b>4%</b> of the roof. Not a misclassification; a collapse.</div>
+  </section>
+
+  <!-- 10 — EX6 SHARED MEMORY -->
+  <section class="slide">
+    <div class="kicker">Exhibit 6 · the deliberate tell</div>
+    <h2>Shared memory — locality you <em>choose</em>, occupancy you <em>pay</em></h2>
+    <div class="split">
+      <div class="panel tell">
+        <div class="lbl"><span class="dot"></span>The tell · 32 KB/block staging buffer</div>
+<pre><span class="k">__shared__</span> float tile[8192]; <span class="c">// 32 KB</span>
+<span class="c">// stage once, reuse 256× from smem</span></pre>
+        <p style="color:var(--dim); margin-top:.9rem; font-size:.92rem">The chosen cousin of the Ex3 L2 trap: deliberate on-chip reuse. But <code>__shared__</code> consumes a per-SM resource.</p>
+      </div>
+      <div class="panel reality ok">
+        <div class="lbl"><span class="dot"></span>The reality · the binding cap flips</div>
+        <div class="metric"><span class="cap">smem per block</span><div class="big cool">32768 B</div></div>
+        <div class="metric"><span class="cap">occupancy ceiling · cap flips thread → smem</span><div class="big gold">5 blocks/SM = 62%</div></div>
+        <p style="color:var(--dim); font-size:.9rem">164 KB/SM ÷ 32 KB = 5. The <code>min(thread, block, reg, smem)</code> ceiling now binds on <b style="color:var(--ink)">smem</b>.</p>
+      </div>
+    </div>
+    <div class="verdict hold" style="margin-top:1.1rem">tell holds — both faces of shared memory: on-chip reuse <i>and</i> its occupancy cost.</div>
+  </section>
+
+  <!-- 11 — SYNTHESIS -->
+  <section class="slide">
+    <div class="kicker">Synthesis</div>
+    <div style="display:grid; grid-template-columns:1.1fr .9fr; gap:3rem; align-items:center">
+      <div>
+        <p class="thesis">Read the source to form a <span class="hl">hypothesis</span>.<br>The compile stats, occupancy, and a measurement are what <span style="color:var(--warn)">confirm</span> or <span style="color:var(--warn)">destroy</span> it.</p>
+        <div class="row3" style="grid-template-columns:1fr; gap:.7rem; margin-top:1.6rem">
+          <div><b style="color:var(--accent)">Knob 1 · AI</b> — picks the roof &nbsp;<span style="color:var(--faint)">(Ex1, Ex2)</span></div>
+          <div><b style="color:var(--gold)">Knob 2 · locality</b> — moves the roof &nbsp;<span style="color:var(--faint)">(Ex3, Ex6)</span></div>
+          <div><b style="color:var(--warn)">Knob 3 · access efficiency</b> — decides if you reach it &nbsp;<span style="color:var(--faint)">(Ex4, Ex5)</span></div>
+        </div>
+      </div>
+      <div>
+        <ul class="clean">
+          <li><b>Three regimes, not two.</b> Latency-bound lives under both roofs — the 2-axis roofline can't draw it.</li>
+          <li><b>Compute-bound ≠ peak.</b> Ex1 tops at 39% — ILP and latency still matter above the ridge.</li>
+          <li><b>The traps are invisible in the math.</b> Cache reuse, local spills, scatter — none change AI.</li>
+          <li><b>The tells are in the stats.</b> <code>regs</code>, <code>smem</code>, <code>local</code>, occupancy, apparent GB/s.</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+</div>
+
+<div class="bar"><i id="bar"></i></div>
+<div class="tag" id="tag">tells vs traps</div>
+<div class="nav"><b id="cur">1</b> / <span id="tot">11</span> &nbsp;·&nbsp; ← →</div>
+
+<script>
+  const slides = [...document.querySelectorAll('.slide')];
+  const tags = ['title','premise','the bench','the frame','exhibit 1','exhibit 1 · knobs','exhibit 2','exhibit 2 · offload','exhibit 3 ★','exhibit 4','exhibit 5','exhibit 6','synthesis'];
+  let i = 0;
+  const tot = slides.length;
+  document.getElementById('tot').textContent = tot;
+  function show(n){
+    i = Math.max(0, Math.min(tot-1, n));
+    slides.forEach((s,k)=>s.classList.toggle('active', k===i));
+    document.getElementById('cur').textContent = i+1;
+    document.getElementById('bar').style.width = ((i+1)/tot*100)+'%';
+    document.getElementById('tag').textContent = tags[i];
+  }
+  function next(){show(i+1)} function prev(){show(i-1)}
+  document.addEventListener('keydown', e=>{
+    if(e.key==='ArrowRight'||e.key===' '||e.key==='PageDown'){e.preventDefault();next()}
+    if(e.key==='ArrowLeft'||e.key==='PageUp'){e.preventDefault();prev()}
+    if(e.key==='Home')show(0); if(e.key==='End')show(tot-1);
+  });
+  document.addEventListener('click', e=>{ if(e.clientX > innerWidth*0.5) next(); else prev(); });
+  show(0);
+</script>
+</body>
+</html>

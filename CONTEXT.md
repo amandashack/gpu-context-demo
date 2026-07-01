@@ -79,5 +79,9 @@ Each Worker independently follows the pattern: **warmup → device sync → time
 
 ## Flagged for Phase 2
 
-- An alternative aggregation — `sum(kernels) ÷ sum(elapsed)` instead of `÷ max(elapsed)` — would answer "how busy were the workers on average?" rather than "how long did the job take?" Useful for diagnosing whether pipelining is keeping all Workers busy uniformly or just shortening the critical path.
-- A second heatmap with **Mode A at N=1** as baseline — shows scaling efficiency rather than "is sharing worth it?". Right view for the practical-implementation audience.
+Phase 2 scope (kernel regimes and tuning tradeoffs) lives in
+[ADR-0002](./docs/adr/0002-phase2-kernel-regimes-scope.md) — the new
+`gpu_kernel_regimes.py` notebook, the memory-traffic kernel linchpin, the
+`regime`/`tune` axes, and the deferred threads (alternative aggregation, the
+Mode A N=1 scaling-efficiency baseline, Mode D). See the ADR rather than
+duplicating the list here.
